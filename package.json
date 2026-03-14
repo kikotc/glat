@@ -4,7 +4,7 @@
   "description": "Context management for multi-agent workflows",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.110.0"
+    "vscode": "^1.101.0"
   },
   "categories": [
     "Other"
@@ -14,10 +14,37 @@
   "contributes": {
     "commands": [
       {
-        "command": "glat.helloWorld",
-        "title": "Hello World"
+        "command": "glat.openPanel",
+        "title": "GLAT: Open Panel"
+      },
+      {
+        "command": "glat.broadcastChanges",
+        "title": "GLAT: Broadcast Local Changes"
+      },
+      {
+        "command": "glat.prepareContext",
+        "title": "GLAT: Prepare Context for Copilot"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "glat",
+          "title": "GLAT",
+          "icon": "media/glat.svg"
+        }
+      ]
+    },
+    "views": {
+      "glat": [
+        {
+          "type": "webview",
+          "id": "glat.changeCardsView",
+          "name": "Change Cards",
+          "icon": "$(git-commit)"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
