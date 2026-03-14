@@ -1,6 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { exec } from 'node:child_process';
 
 type ChangeCard = {
 	author: string;
@@ -26,6 +27,12 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			enableScripts: true,
 			localResourceRoots: [this._extensionUri]
 		};
+
+		webviewView.webview.onDidReceiveMessage(async (msg) => {
+			if (msg?.type === 'command' && typeof msg.command === 'string') {
+				await vscode.commands.executeCommand(msg.command);
+			}
+		});
 
 		webviewView.webview.html = this._getHtml(webviewView.webview);
 	}
@@ -195,6 +202,37 @@ function getWorkspaceRoot(): string | undefined {
 	return folder?.uri.fsPath;
 }
 
+function execInWorkspace(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		exec(command, { cwd, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+			if (err) {
+				reject(new Error(stderr?.toString() || err.message));
+				return;
+			}
+			resolve({ stdout: stdout?.toString() ?? '', stderr: stderr?.toString() ?? '' });
+		});
+	});
+}
+
+async function getGitAuthorName(workspaceRoot: string): Promise<string> {
+	try {
+		const { stdout } = await execInWorkspace('git config user.name', workspaceRoot);
+		const name = stdout.trim();
+		return name || 'developer';
+	} catch {
+		return 'developer';
+	}
+}
+
+function toWorkspaceRelativePath(absPath: string): string {
+	return vscode.workspace.asRelativePath(absPath, false);
+}
+
+function fenceCode(languageId: string | undefined, content: string): string {
+	const lang = languageId && languageId !== 'plaintext' ? languageId : '';
+	return `\n\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	const viewProvider = new GlaTChangeCardsViewProvider(context.extensionUri);
 	context.subscriptions.push(
@@ -203,12 +241,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('glat.openPanel', async () => {
-			const panel = vscode.window.createWebviewPanel(
-				'glat.panel',
-				'GLAT',
-				vscode.ViewColumn.One,
-				{ enableScripts: true }
-			);
+			const panel = vscode.window.createWebviewPanel('glat.panel', 'GLAT', vscode.ViewColumn.One, { enableScripts: true });
 			panel.webview.html = `<!doctype html>
 			<html><body style="padding:12px;font-family:var(--vscode-font-family);color:var(--vscode-foreground)">
 				<h2 style="margin:0 0 8px">GLAT</h2>
@@ -216,23 +249,76 @@ export function activate(context: vscode.ExtensionContext) {
 			</body></html>`;
 		}),
 
-		// UI frame commands (backend will be added next)
 		vscode.commands.registerCommand('glat.broadcastChanges', async () => {
-			// Placeholder: create a fake card so the UI is visible.
-			const root = getWorkspaceRoot();
-			changeCards.push({
-				author: 'developer',
+			const workspaceRoot = getWorkspaceRoot();
+			if (!workspaceRoot) {
+				vscode.window.showErrorMessage('GLAT: No workspace folder found. Open a folder/workspace first.');
+				return;
+			}
+
+			let stdout: string;
+			try {
+				({ stdout } = await execInWorkspace('git diff --name-only', workspaceRoot));
+			} catch (e) {
+				vscode.window.showErrorMessage(`GLAT: Failed to read git diff. ${e instanceof Error ? e.message : String(e)}`);
+				return;
+			}
+
+			const changedFiles = stdout
+				.trim()
+				.split(/\r?\n/)
+				.map((s) => s.trim())
+				.filter(Boolean);
+
+			if (changedFiles.length === 0) {
+				vscode.window.showInformationMessage('GLAT: No local changes detected (git diff was empty).');
+				return;
+			}
+
+			const author = await getGitAuthorName(workspaceRoot);
+			const card: ChangeCard = {
+				author,
 				timestamp: new Date().toISOString(),
-				changedFiles: root ? ['(example) src/extension.ts'] : ['(example) no workspace opened'],
-				impactedFiles: root ? ['(example) src/extension.ts'] : ['(example) no workspace opened'],
-				summary: 'Local code changes detected (UI placeholder)'
-			});
+				changedFiles,
+				impactedFiles: changedFiles,
+				summary: `Local code changes detected (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'})`
+			};
+
+			changeCards.push(card);
 			viewProvider.refresh();
-			vscode.window.showInformationMessage('GLAT: Added a placeholder change card (UI only).');
+			vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
 		}),
 
 		vscode.commands.registerCommand('glat.prepareContext', async () => {
-			vscode.window.showInformationMessage('GLAT: Prepare Context (UI placeholder). Backend wiring next.');
+			const editor = vscode.window.activeTextEditor;
+			if (!editor) {
+				vscode.window.showErrorMessage('GLAT: No active editor. Open a file first.');
+				return;
+			}
+
+			const userPrompt = await vscode.window.showInputBox({
+				prompt: 'What do you want Copilot to do?',
+				placeHolder: 'e.g., Refactor this function to be more readable'
+			});
+			if (!userPrompt) {
+				return;
+			}
+
+			const activeAbsPath = editor.document.fileName;
+			const activeRelPath = toWorkspaceRelativePath(activeAbsPath);
+			const fileContents = editor.document.getText();
+
+			const relevant = changeCards.filter((c) => c.impactedFiles.includes(activeRelPath));
+			const teammateChanges = relevant.length
+				? relevant
+						.map((c) => `- **${c.author}** (${new Date(c.timestamp).toLocaleString()}): ${c.summary}`)
+						.join('\n')
+				: '- (none)';
+
+			const prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}\n\n## Current file\n**${activeRelPath}**${fenceCode(editor.document.languageId, fileContents)}`;
+
+			const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
+			await vscode.window.showTextDocument(doc, { preview: false });
 		})
 	);
 }
