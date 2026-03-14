@@ -3,26 +3,28 @@
 import * as vscode from 'vscode';
 import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as supabase from './supabase';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-type ChangeCard = {
+export type ChangeCard = {
 	id: string;
 	author: string;
-	timestamp: string;
+	created_at: string;
 	changed_files: string[];
 	impacted_files: string[];
 	summary: string;
+	raw_diff: string | null;
 };
-
-const changeCards: ChangeCard[] = [];
 
 class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'glat.changeCardsView';
 
 	private _view?: vscode.WebviewView;
+	private _changeCards: ChangeCard[] = [];
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
-	resolveWebviewView(webviewView: vscode.WebviewView): void {
+	async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
 		this._view = webviewView;
 
 		webviewView.webview.options = {
@@ -44,20 +46,28 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
-		webviewView.webview.html = this._getHtml(webviewView.webview);
+		await this.updateView();
 	}
 
-	public refresh(): void {
+	public async updateView(): Promise<void> {
 		if (!this._view) {
 			return;
 		}
+
+		try {
+			this._changeCards = await supabase.getRecentChangeCards();
+		} catch (e) {
+			this._changeCards = [];
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			console.error(e);
+			vscode.window.showErrorMessage(`GLAT: Failed to fetch change cards. ${errorMessage}`);
+		}
+
 		this._view.webview.html = this._getHtml(this._view.webview);
 	}
 
 	private _getHtml(webview: vscode.Webview): string {
-		const cards = changeCards
-			.slice()
-			.reverse()
+		const cards = this._changeCards
 			.map((c) => {
 				const changed = c.changed_files.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
 				const more = c.changed_files.length > 5 ? `<li>…and ${c.changed_files.length - 5} more</li>` : '';
@@ -66,7 +76,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 					<section class="card">
 						<header>
 							<div class="title">${escapeHtml(c.summary)}</div>
-							<div class="meta">${escapeHtml(c.author)} • ${new Date(c.timestamp).toLocaleString()}</div>
+							<div class="meta">${escapeHtml(c.author)} • ${new Date(c.created_at).toLocaleString()}</div>
 						</header>
 						<div class="body">
 							<div class="label">Changed files</div>
@@ -233,7 +243,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		</div>
 
 		<div class="main">
-			${changeCards.length ? cards : empty}
+			${this._changeCards.length ? cards : empty}
 		</div>
 
 		<div class="composer">
@@ -338,6 +348,40 @@ function fenceCode(languageId: string | undefined, content: string): string {
 	return `\n\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
 }
 
+async function generateSmartCardData(rawDiff: string, changedFiles: string[]): Promise<{ summary: string; impacted_files: string[] }> {
+	const apiKey = process.env.GEMINI_API_KEY;
+	if (!apiKey || apiKey === 'your-gemini-api-key-here') {
+		console.warn('GEMINI_API_KEY not found. Falling back to generic summary.');
+		return {
+			summary: `Local code changes detected (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'})`,
+			impacted_files: changedFiles
+		};
+	}
+
+	try {
+		const genAI = new GoogleGenerativeAI(apiKey);
+		const model = genAI.getGenerativeModel({
+			model: 'gemini-1.5-flash',
+			generationConfig: { responseMimeType: 'application/json' }
+		});
+
+		const prompt = `You are an expert developer assistant. Analyze the given git diff and provide a concise, 1-2 sentence human-readable summary of the changes. Also, predict an array of other files in the project that might be impacted by this change (e.g., if a function signature changes, where might it be called?). Output JSON with exactly two keys: "summary" (string) and "impacted_files" (array of strings, always including the originally changed files).
+
+Changed Files:
+${changedFiles.join('\n')}
+
+Git Diff:
+${rawDiff}`;
+
+		const result = await model.generateContent(prompt);
+		const parsed = JSON.parse(result.response.text());
+		return { summary: parsed.summary || 'Local changes detected', impacted_files: parsed.impacted_files || changedFiles };
+	} catch (error) {
+		console.error('Failed to generate smart summary with Gemini:', error);
+		return { summary: 'Local code changes detected (fallback)', impacted_files: changedFiles };
+	}
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	const viewProvider = new GlaTChangeCardsViewProvider(context.extensionUri);
 	context.subscriptions.push(
@@ -375,20 +419,29 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
+			const { stdout: rawDiff } = await execInWorkspace('git diff', workspaceRoot);
+
 			const author = await getGitAuthorName(workspaceRoot);
+			const smartData = await generateSmartCardData(rawDiff, changedFiles);
+
 			const card: ChangeCard = {
 				id: randomUUID(),
 				author,
-				timestamp: new Date().toISOString(),
+				created_at: new Date().toISOString(),
 				changed_files: changedFiles,
-				impacted_files: changedFiles,
-				summary: `Local code changes detected (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'})`
+				impacted_files: smartData.impacted_files,
+				summary: smartData.summary,
+				raw_diff: rawDiff
 			};
 
-			// Supabase-ready: this is where we'd insert(card) into the change_cards table.
-			changeCards.push(card);
-			viewProvider.refresh();
-			vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
+			try {
+				await supabase.insertChangeCard(card);
+				await viewProvider.updateView();
+				vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
+			} catch (e) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				vscode.window.showErrorMessage(`GLAT: Failed to broadcast change card. ${errorMessage}`);
+			}
 		}),
 
 		vscode.commands.registerCommand('glat.prepareContext', async (providedPrompt?: string) => {
@@ -413,11 +466,18 @@ export function activate(context: vscode.ExtensionContext) {
 			const activeRelPath = toWorkspaceRelativePath(activeAbsPath);
 			const fileContents = editor.document.getText();
 
-			// Supabase-ready: this is where we'd query change_cards.contains('impacted_files', [activeRelPath])
-			const relevant = changeCards.filter((c) => c.impacted_files.includes(activeRelPath));
+			let relevant: ChangeCard[] = [];
+			try {
+				relevant = await supabase.getCardsForFile(activeRelPath);
+			} catch (e) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				vscode.window.showErrorMessage(`GLAT: Failed to retrieve context. ${errorMessage}`);
+				// Continue with empty context
+			}
+
 			const teammateChanges = relevant.length
 				? relevant
-						.map((c) => `- **${c.author}** (${new Date(c.timestamp).toLocaleString()}): ${c.summary}`)
+						.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`)
 						.join('\n')
 				: '- (none)';
 
