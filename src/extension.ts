@@ -2,12 +2,14 @@
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import { exec } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 type ChangeCard = {
+	id: string;
 	author: string;
 	timestamp: string;
-	changedFiles: string[];
-	impactedFiles: string[];
+	changed_files: string[];
+	impacted_files: string[];
 	summary: string;
 };
 
@@ -57,8 +59,8 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			.slice()
 			.reverse()
 			.map((c) => {
-				const changed = c.changedFiles.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
-				const more = c.changedFiles.length > 5 ? `<li>…and ${c.changedFiles.length - 5} more</li>` : '';
+				const changed = c.changed_files.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
+				const more = c.changed_files.length > 5 ? `<li>…and ${c.changed_files.length - 5} more</li>` : '';
 
 				return `
 					<section class="card">
@@ -323,6 +325,14 @@ function toWorkspaceRelativePath(absPath: string): string {
 	return vscode.workspace.asRelativePath(absPath, false);
 }
 
+function parseGitNameOnlyOutput(stdout: string): string[] {
+	return stdout
+			.trim()
+			.split(/\r?\n/)
+			.map((s) => s.trim())
+			.filter(Boolean);
+}
+
 function fenceCode(languageId: string | undefined, content: string): string {
 	const lang = languageId && languageId !== 'plaintext' ? languageId : '';
 	return `\n\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
@@ -359,12 +369,7 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			const changedFiles = stdout
-				.trim()
-				.split(/\r?\n/)
-				.map((s) => s.trim())
-				.filter(Boolean);
-
+			const changedFiles = parseGitNameOnlyOutput(stdout);
 			if (changedFiles.length === 0) {
 				vscode.window.showInformationMessage('GLAT: No local changes detected (git diff was empty).');
 				return;
@@ -372,13 +377,15 @@ export function activate(context: vscode.ExtensionContext) {
 
 			const author = await getGitAuthorName(workspaceRoot);
 			const card: ChangeCard = {
+				id: randomUUID(),
 				author,
 				timestamp: new Date().toISOString(),
-				changedFiles,
-				impactedFiles: changedFiles,
+				changed_files: changedFiles,
+				impacted_files: changedFiles,
 				summary: `Local code changes detected (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'})`
 			};
 
+			// Supabase-ready: this is where we'd insert(card) into the change_cards table.
 			changeCards.push(card);
 			viewProvider.refresh();
 			vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
@@ -406,7 +413,8 @@ export function activate(context: vscode.ExtensionContext) {
 			const activeRelPath = toWorkspaceRelativePath(activeAbsPath);
 			const fileContents = editor.document.getText();
 
-			const relevant = changeCards.filter((c) => c.impactedFiles.includes(activeRelPath));
+			// Supabase-ready: this is where we'd query change_cards.contains('impacted_files', [activeRelPath])
+			const relevant = changeCards.filter((c) => c.impacted_files.includes(activeRelPath));
 			const teammateChanges = relevant.length
 				? relevant
 						.map((c) => `- **${c.author}** (${new Date(c.timestamp).toLocaleString()}): ${c.summary}`)
@@ -415,12 +423,9 @@ export function activate(context: vscode.ExtensionContext) {
 
 			const prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}\n\n## Current file\n**${activeRelPath}**${fenceCode(editor.document.languageId, fileContents)}`;
 
-			// Copy to clipboard so the user can paste directly into Copilot.
 			await vscode.env.clipboard.writeText(prompt);
-
 			const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
 			await vscode.window.showTextDocument(doc, { preview: false });
-
 			vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
 		})
 	);
