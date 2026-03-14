@@ -29,8 +29,16 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		};
 
 		webviewView.webview.onDidReceiveMessage(async (msg) => {
-			if (msg?.type === 'command' && typeof msg.command === 'string') {
+			if (!msg) {
+				return;
+			}
+			if (msg.type === 'command' && typeof msg.command === 'string') {
 				await vscode.commands.executeCommand(msg.command);
+				return;
+			}
+			if (msg.type === 'prepareContext' && typeof msg.prompt === 'string') {
+				await vscode.commands.executeCommand('glat.prepareContext', msg.prompt);
+				return;
 			}
 		});
 
@@ -91,13 +99,29 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		   doesn't collapse/overflow badly below a minimum. */
 		body {
 			min-width: var(--minWidth);
-			padding: var(--pad);
+			padding: 0;
+			margin: 0;
 			color: var(--vscode-foreground);
 			font-family: var(--vscode-font-family);
 			font-size: var(--vscode-font-size);
 			box-sizing: border-box;
+			height: 100vh;
+			overflow: hidden;
 		}
 		*, *::before, *::after { box-sizing: inherit; }
+
+		.shell {
+			display: flex;
+			flex-direction: column;
+			height: 100vh;
+			min-width: var(--minWidth);
+		}
+
+		.header {
+			padding: var(--pad);
+			padding-bottom: 0;
+		}
+
 		h1 {
 			margin: 0 0 10px;
 			font-size: 14px;
@@ -107,9 +131,50 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		.toolbar {
 			display: flex;
 			gap: 8px;
-			margin-bottom: 12px;
+			margin-bottom: 10px;
 			flex-wrap: wrap;
 		}
+
+		.main {
+			flex: 1;
+			overflow: auto;
+			padding: var(--pad);
+			padding-top: 8px;
+		}
+
+		.composer {
+			padding: var(--pad);
+			border-top: 1px solid var(--border);
+			background: color-mix(in srgb, var(--vscode-editor-background) 96%, transparent);
+		}
+		.promptRow {
+			display: flex;
+			gap: 8px;
+			align-items: flex-end;
+		}
+
+		textarea {
+			flex: 1;
+			min-width: 0;
+			padding: 7px 10px;
+			border-radius: 8px;
+			border: 1px solid var(--border);
+			background: var(--vscode-input-background);
+			color: var(--vscode-input-foreground);
+			outline: none;
+			resize: none;
+			overflow-y: auto;
+			overflow-x: hidden;
+			white-space: pre-wrap;
+			word-break: break-word;
+			line-height: 1.35;
+			font-family: var(--vscode-font-family);
+			font-size: var(--vscode-font-size);
+		}
+		textarea:focus {
+			border-color: var(--vscode-focusBorder);
+		}
+
 		button {
 			appearance: none;
 			border: 1px solid var(--border);
@@ -125,23 +190,12 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			text-overflow: ellipsis;
 			transition: filter 120ms ease, transform 60ms ease;
 		}
-		button:hover {
-			filter: brightness(0.92);
-		}
-		button:active {
-			filter: brightness(0.86);
-			transform: translateY(0.5px);
-		}
-		button.secondary {
-			background: transparent;
-			color: var(--vscode-foreground);
-		}
-		button.secondary:hover {
-			background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
-		}
-		button.secondary:active {
-			background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
-		}
+		button:hover { filter: brightness(0.92); }
+		button:active { filter: brightness(0.86); transform: translateY(0.5px); }
+		button.secondary { background: transparent; color: var(--vscode-foreground); }
+		button.secondary:hover { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
+		button.secondary:active { background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
+
 		.empty {
 			padding: 18px 12px;
 			border: 1px dashed var(--border);
@@ -167,20 +221,61 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 	</style>
 </head>
 <body>
-	<h1>GLAT • Change Cards</h1>
-	<div class="toolbar">
-		<button id="broadcast">Broadcast</button>
-		<button class="secondary" id="prepare">Prepare Context</button>
+	<div class="shell">
+		<div class="header">
+			<h1>GLAT • Change Cards</h1>
+			<div class="toolbar">
+				<button id="broadcast">Broadcast</button>
+				<button class="secondary" id="prepare">Prepare Context</button>
+			</div>
+		</div>
+
+		<div class="main">
+			${changeCards.length ? cards : empty}
+		</div>
+
+		<div class="composer">
+			<div class="promptRow">
+				<textarea id="prompt" rows="2" placeholder="Ask Copilot… (GLAT will add teammate context)"></textarea>
+				<button class="send" id="send">Enter</button>
+			</div>
+		</div>
 	</div>
-	${changeCards.length ? cards : empty}
 
 	<script>
 		const vscode = acquireVsCodeApi?.();
+
+		const promptEl = document.getElementById('prompt');
+		const sendBtn = document.getElementById('send');
+
+		function autoSize() {
+			promptEl.style.height = 'auto';
+			promptEl.style.height = Math.min(promptEl.scrollHeight, 140) + 'px';
+		}
+
+		function sendPrompt() {
+			const prompt = (promptEl.value || '').trim();
+			if (!prompt) return;
+			vscode?.postMessage({ type: 'prepareContext', prompt });
+		}
+
 		document.getElementById('broadcast').addEventListener('click', () => {
 			vscode?.postMessage({ type: 'command', command: 'glat.broadcastChanges' });
 		});
 		document.getElementById('prepare').addEventListener('click', () => {
 			vscode?.postMessage({ type: 'command', command: 'glat.prepareContext' });
+		});
+
+		sendBtn.addEventListener('click', sendPrompt);
+		promptEl.addEventListener('input', autoSize);
+		autoSize();
+
+		promptEl.addEventListener('keydown', (e) => {
+			// Enter submits; Shift+Enter inserts a newline
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				sendPrompt();
+			}
 		});
 	</script>
 </body>
@@ -289,17 +384,20 @@ export function activate(context: vscode.ExtensionContext) {
 			vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
 		}),
 
-		vscode.commands.registerCommand('glat.prepareContext', async () => {
+		vscode.commands.registerCommand('glat.prepareContext', async (providedPrompt?: string) => {
 			const editor = vscode.window.activeTextEditor;
 			if (!editor) {
 				vscode.window.showErrorMessage('GLAT: No active editor. Open a file first.');
 				return;
 			}
 
-			const userPrompt = await vscode.window.showInputBox({
-				prompt: 'What do you want Copilot to do?',
-				placeHolder: 'e.g., Refactor this function to be more readable'
-			});
+			const userPrompt =
+				typeof providedPrompt === 'string' && providedPrompt.trim().length > 0
+					? providedPrompt.trim()
+					: await vscode.window.showInputBox({
+							prompt: 'What do you want Copilot to do?',
+							placeHolder: 'e.g., Refactor this function to be more readable'
+						});
 			if (!userPrompt) {
 				return;
 			}
@@ -317,8 +415,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 			const prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}\n\n## Current file\n**${activeRelPath}**${fenceCode(editor.document.languageId, fileContents)}`;
 
+			// Copy to clipboard so the user can paste directly into Copilot.
+			await vscode.env.clipboard.writeText(prompt);
+
 			const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
 			await vscode.window.showTextDocument(doc, { preview: false });
+
+			vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
 		})
 	);
 }
