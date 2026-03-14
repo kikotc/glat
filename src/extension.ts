@@ -349,8 +349,8 @@ function fenceCode(languageId: string | undefined, content: string): string {
 }
 
 async function generateSmartCardData(rawDiff: string, changedFiles: string[]): Promise<{ summary: string; impacted_files: string[] }> {
-	const apiKey = process.env.GEMINI_API_KEY;
-	if (!apiKey || apiKey === 'your-gemini-api-key-here') {
+	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
+	if (!apiKey) {
 		console.warn('GEMINI_API_KEY not found. Falling back to generic summary.');
 		return {
 			summary: `Local code changes detected (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'})`,
@@ -361,7 +361,7 @@ async function generateSmartCardData(rawDiff: string, changedFiles: string[]): P
 	try {
 		const genAI = new GoogleGenerativeAI(apiKey);
 		const model = genAI.getGenerativeModel({
-			model: 'gemini-1.5-flash',
+			model: 'gemini-2.5-flash',
 			generationConfig: { responseMimeType: 'application/json' }
 		});
 
@@ -379,6 +379,48 @@ ${rawDiff}`;
 	} catch (error) {
 		console.error('Failed to generate smart summary with Gemini:', error);
 		return { summary: 'Local code changes detected (fallback)', impacted_files: changedFiles };
+	}
+}
+
+async function filterRelevantCardsWithGemini(userPrompt: string, cards: ChangeCard[]): Promise<ChangeCard[]> {
+	if (cards.length === 0) return [];
+
+	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
+	if (!apiKey) {
+		console.warn('GEMINI_API_KEY not found. Returning recent cards as fallback.');
+		return cards.slice(0, 5);
+	}
+
+	try {
+		const genAI = new GoogleGenerativeAI(apiKey);
+		const model = genAI.getGenerativeModel({
+			model: 'gemini-2.5-flash',
+			generationConfig: { responseMimeType: 'application/json' }
+		});
+
+		// Pass a minimized version to save tokens
+		const simplifiedCards = cards.map(c => ({
+			id: c.id,
+			summary: c.summary,
+			impacted_files: c.impacted_files
+		}));
+
+		const prompt = `You are an AI context router for a coding assistant.
+The user wants to accomplish the following task:
+"${userPrompt}"
+
+Here are recent code changes made by teammates across the codebase:
+${JSON.stringify(simplifiedCards, null, 2)}
+
+Determine which of these teammate changes might be relevant to the user's task. Output JSON with exactly one key: "relevant_ids" (array of strings matching the relevant card ids).`;
+
+		const result = await model.generateContent(prompt);
+		const parsed = JSON.parse(result.response.text());
+		const relevantIds = new Set<string>(parsed.relevant_ids || []);
+		return cards.filter(c => relevantIds.has(c.id));
+	} catch (error) {
+		console.error('Failed to filter relevant cards with Gemini:', error);
+		return cards.slice(0, 5); // Fallback to most recent on error
 	}
 }
 
@@ -422,35 +464,36 @@ export function activate(context: vscode.ExtensionContext) {
 			const { stdout: rawDiff } = await execInWorkspace('git diff', workspaceRoot);
 
 			const author = await getGitAuthorName(workspaceRoot);
-			const smartData = await generateSmartCardData(rawDiff, changedFiles);
-
-			const card: ChangeCard = {
-				id: randomUUID(),
-				author,
-				created_at: new Date().toISOString(),
-				changed_files: changedFiles,
-				impacted_files: smartData.impacted_files,
-				summary: smartData.summary,
-				raw_diff: rawDiff
-			};
-
-			try {
-				await supabase.insertChangeCard(card);
-				await viewProvider.updateView();
-				vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
-			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : String(e);
-				vscode.window.showErrorMessage(`GLAT: Failed to broadcast change card. ${errorMessage}`);
-			}
+			
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "GLAT: Analyzing and broadcasting changes...",
+				cancellable: false
+			}, async () => {
+				const smartData = await generateSmartCardData(rawDiff, changedFiles);
+	
+				const card: ChangeCard = {
+					id: randomUUID(),
+					author,
+					created_at: new Date().toISOString(),
+					changed_files: changedFiles,
+					impacted_files: smartData.impacted_files,
+					summary: smartData.summary,
+					raw_diff: rawDiff
+				};
+	
+				try {
+					await supabase.insertChangeCard(card);
+					await viewProvider.updateView();
+					vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
+				} catch (e) {
+					const errorMessage = e instanceof Error ? e.message : String(e);
+					vscode.window.showErrorMessage(`GLAT: Failed to broadcast change card. ${errorMessage}`);
+				}
+			});
 		}),
 
 		vscode.commands.registerCommand('glat.prepareContext', async (providedPrompt?: string) => {
-			const editor = vscode.window.activeTextEditor;
-			if (!editor) {
-				vscode.window.showErrorMessage('GLAT: No active editor. Open a file first.');
-				return;
-			}
-
 			const userPrompt =
 				typeof providedPrompt === 'string' && providedPrompt.trim().length > 0
 					? providedPrompt.trim()
@@ -462,31 +505,43 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			const activeAbsPath = editor.document.fileName;
-			const activeRelPath = toWorkspaceRelativePath(activeAbsPath);
-			const fileContents = editor.document.getText();
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "GLAT: Finding relevant context...",
+				cancellable: false
+			}, async () => {
+				const editor = vscode.window.activeTextEditor;
+				const activeAbsPath = editor?.document.fileName;
+				const activeRelPath = activeAbsPath ? toWorkspaceRelativePath(activeAbsPath) : undefined;
+				const fileContents = editor?.document.getText();
 
-			let relevant: ChangeCard[] = [];
-			try {
-				relevant = await supabase.getCardsForFile(activeRelPath);
-			} catch (e) {
-				const errorMessage = e instanceof Error ? e.message : String(e);
-				vscode.window.showErrorMessage(`GLAT: Failed to retrieve context. ${errorMessage}`);
-				// Continue with empty context
-			}
+				let recentCards: ChangeCard[] = [];
+				try {
+					// Fetch the workspace-wide memory pool instead of just the active file
+					recentCards = await supabase.getRecentChangeCards(50);
+				} catch (e) {
+					console.error(e);
+				}
 
-			const teammateChanges = relevant.length
-				? relevant
-						.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`)
-						.join('\n')
-				: '- (none)';
+				const relevant = await filterRelevantCardsWithGemini(userPrompt, recentCards);
 
-			const prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}\n\n## Current file\n**${activeRelPath}**${fenceCode(editor.document.languageId, fileContents)}`;
+				const teammateChanges = relevant.length
+					? relevant.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`).join('\n')
+					: '- (none)';
 
-			await vscode.env.clipboard.writeText(prompt);
-			const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
-			await vscode.window.showTextDocument(doc, { preview: false });
-			vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
+				let prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}`;
+
+				if (activeRelPath && fileContents) {
+					prompt += `\n\n## Current file\n**${activeRelPath}**${fenceCode(editor?.document.languageId, fileContents)}`;
+				} else {
+					prompt += `\n\n*(No active file provided)*`;
+				}
+
+				await vscode.env.clipboard.writeText(prompt);
+				const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
+				await vscode.window.showTextDocument(doc, { preview: false });
+				vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
+			});
 		})
 	);
 }

@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import * as vscode from 'vscode';
 import type { ChangeCard } from './extension';
 
 let supabase: SupabaseClient | null = null;
@@ -8,13 +9,12 @@ function getSupabaseClient(): SupabaseClient {
 		return supabase;
 	}
 
-	// These variables are expected to be set in the environment,
-	// e.g., in .vscode/launch.json for debugging.
-	const supabaseUrl = process.env.SUPABASE_URL;
-	const supabaseKey = process.env.SUPABASE_ANON_KEY;
+	const config = vscode.workspace.getConfiguration('glat');
+	const supabaseUrl = config.get<string>('supabaseUrl');
+	const supabaseKey = config.get<string>('supabaseAnonKey');
 
 	if (!supabaseUrl || !supabaseKey) {
-		throw new Error('Supabase URL or anonymous key not set. Configure SUPABASE_URL and SUPABASE_ANON_KEY environment variables.');
+		throw new Error('Supabase URL or anonymous key not set. Configure them in VS Code Settings under GLAT.');
 	}
 
 	supabase = createClient(supabaseUrl, supabaseKey);

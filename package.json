@@ -2,6 +2,7 @@
   "name": "glat",
   "displayName": "GLAT",
   "description": "Context management for multi-agent workflows",
+  "publisher": "glat-team",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.101.0"
@@ -12,6 +13,26 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "GLAT",
+      "properties": {
+        "glat.geminiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key for Gemini to generate smart summaries."
+        },
+        "glat.supabaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Supabase Project URL for storing and retrieving change cards."
+        },
+        "glat.supabaseAnonKey": {
+          "type": "string",
+          "default": "",
+          "description": "Supabase Anonymous Key for the database."
+        }
+      }
+    },
     "commands": [
       {
         "command": "glat.openPanel",
