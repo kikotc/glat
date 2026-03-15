@@ -87,6 +87,19 @@ export async function getRecentChangeCards(limit = 50): Promise<ChangeCard[]> {
 	return (data as ChangeCard[]) || [];
 }
 
+export async function getCardsByIds(cardIds: string[]): Promise<ChangeCard[]> {
+	if (cardIds.length === 0) return [];
+	const client = getSupabaseClient();
+	const { data, error } = await client.from('change_cards').select('*').in('id', cardIds);
+
+	if (error) {
+		console.error('Error fetching change cards by IDs:', error);
+		return [];
+	}
+
+	return (data as ChangeCard[]) || [];
+}
+
 export async function deleteUserCards(author: string): Promise<void> {
 	const client = getSupabaseClient();
 	const { error } = await client.from('change_cards').delete().eq('author', author);

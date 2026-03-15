@@ -5,6 +5,7 @@ import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as supabase from './supabase';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as moorcheh from './moorcheh';
 
 export type ChangeCard = {
 	id: string;
@@ -411,48 +412,6 @@ ${rawDiff}`;
 	}
 }
 
-async function filterRelevantCardsWithGemini(userPrompt: string, cards: ChangeCard[]): Promise<ChangeCard[]> {
-	if (cards.length === 0) return [];
-
-	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
-	if (!apiKey) {
-		console.warn('GEMINI_API_KEY not found. Returning recent cards as fallback.');
-		return cards.slice(0, 5);
-	}
-
-	try {
-		const genAI = new GoogleGenerativeAI(apiKey);
-		const model = genAI.getGenerativeModel({
-			model: 'gemini-2.5-flash',
-			generationConfig: { responseMimeType: 'application/json' }
-		});
-
-		// Pass a minimized version to save tokens
-		const simplifiedCards = cards.map(c => ({
-			id: c.id,
-			summary: c.summary,
-			impacted_files: c.impacted_files
-		}));
-
-		const prompt = `You are an AI context router for a coding assistant.
-The user wants to accomplish the following task:
-"${userPrompt}"
-
-Here are recent code changes made by teammates across the codebase:
-${JSON.stringify(simplifiedCards, null, 2)}
-
-Determine which of these teammate changes might be relevant to the user's task. Output JSON with exactly one key: "relevant_ids" (array of strings matching the relevant card ids).`;
-
-		const result = await model.generateContent(prompt);
-		const parsed = JSON.parse(result.response.text());
-		const relevantIds = new Set<string>(parsed.relevant_ids || []);
-		return cards.filter(c => relevantIds.has(c.id));
-	} catch (error) {
-		console.error('Failed to filter relevant cards with Gemini:', error);
-		return cards.slice(0, 5); // Fallback to most recent on error
-	}
-}
-
 export function activate(context: vscode.ExtensionContext) {
 	const viewProvider = new GlaTChangeCardsViewProvider(context.extensionUri);
 	context.subscriptions.push(
@@ -525,6 +484,13 @@ export function activate(context: vscode.ExtensionContext) {
 				try {
 					await supabase.insertChangeCard(card);
 					
+					// Upload the summary to Moorcheh's semantic memory
+					try {
+						await moorcheh.uploadSummary(smartData.summary, card.id);
+					} catch (moorchehError) {
+						console.error('Failed to upload to Moorcheh:', moorchehError);
+					}
+
 					// Automatically stage the files so the next `git diff` is purely incremental!
 					const filesToStage = changedFiles.map(f => `"${f}"`).join(' ');
 					await execInWorkspace(`git add ${filesToStage}`, workspaceRoot);
@@ -560,18 +526,41 @@ export function activate(context: vscode.ExtensionContext) {
 				const activeRelPath = activeAbsPath ? toWorkspaceRelativePath(activeAbsPath) : undefined;
 				const fileContents = editor?.document.getText();
 
-				let recentCards: ChangeCard[] = [];
+				const relevantCardsMap = new Map<string, ChangeCard>();
+
+				// 1. Ask Moorcheh for the most relevant teammate changes based on the prompt
 				try {
-					// Fetch the workspace-wide memory pool instead of just the active file
-					recentCards = await supabase.getRecentChangeCards(50);
+					const relevantCardIds = await moorcheh.searchRelevantCards(userPrompt);
+					const moorchehCards = await supabase.getCardsByIds(relevantCardIds);
+					for (const card of moorchehCards) {
+						relevantCardsMap.set(card.id, card);
+					}
 				} catch (e) {
-					console.error(e);
+					console.error('Moorcheh search failed:', e);
 				}
 
-				const relevant = await filterRelevantCardsWithGemini(userPrompt, recentCards);
+				// 2. Always include context for the file the user currently has open
+				if (activeRelPath) {
+					try {
+						const activeFileCards = await supabase.getCardsForFile(activeRelPath);
+						for (const card of activeFileCards) {
+							relevantCardsMap.set(card.id, card);
+						}
+					} catch (e) {
+						console.error(`Failed to fetch cards for active file:`, e);
+					}
+				}
+
+				const relevant = Array.from(relevantCardsMap.values());
 
 				const teammateChanges = relevant.length
-					? relevant.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`).join('\n')
+					? relevant.map((c) => {
+							let text = `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`;
+							if (c.raw_diff) {
+								text += `\n\`\`\`diff\n${c.raw_diff}\n\`\`\``;
+							}
+							return text;
+					  }).join('\n\n')
 					: '- (none)';
 
 				let prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}`;

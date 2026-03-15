@@ -30,6 +30,11 @@
           "type": "string",
           "default": "",
           "description": "Supabase Anonymous Key for the database."
+        },
+        "glat.moorchehApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Moorcheh API Key for semantic memory retrieval."
         }
       }
     },
