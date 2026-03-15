@@ -62,6 +62,8 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
+		webviewView.webview.html = this._getHtml(webviewView.webview);
+
 		await this.updateView();
 
 		this._subscription = supabase.subscribeToChanges(() => {
@@ -83,11 +85,11 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			vscode.window.showErrorMessage(`GLAT: Failed to fetch change cards. ${errorMessage}`);
 		}
 
-		this._view.webview.html = this._getHtml(this._view.webview);
+		this._view.webview.postMessage({ type: 'updateCards', html: this._getCardsHtml() });
 		this._view.webview.postMessage({ type: 'refreshComplete' });
 	}
 
-	private _getHtml(webview: vscode.Webview): string {
+	private _getCardsHtml(): string {
 		const cards = this._changeCards
 			.map((c) => {
 				const changed = c.changed_files.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
@@ -115,6 +117,10 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			</div>
 		`;
 
+		return this._changeCards.length ? cards : empty;
+	}
+
+	private _getHtml(webview: vscode.Webview): string {
 		return `<!doctype html>
 <html lang="en">
 <head>
@@ -270,8 +276,8 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			</div>
 		</div>
 
-		<div class="main">
-			${this._changeCards.length ? cards : empty}
+		<div class="main" id="cards-container">
+			${this._getCardsHtml()}
 		</div>
 
 		<div class="composer">
@@ -316,6 +322,9 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			if (event.data.type === 'refreshComplete') {
 				const btn = document.getElementById('refresh');
 				if (btn) btn.textContent = 'Refresh';
+			} else if (event.data.type === 'updateCards') {
+				const container = document.getElementById('cards-container');
+				if (container) container.innerHTML = event.data.html;
 			}
 		});
 
