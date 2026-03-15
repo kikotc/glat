@@ -47,7 +47,9 @@ export async function searchRelevantCards(userPrompt: string): Promise<string[]>
 	const payload = {
 		query: userPrompt,
 		namespaces: [NAMESPACE],
-		top_k: 5
+		top_k: 5,
+		kiosk_mode: true,
+		threshold: 0.1
 	};
 
 	const response = await fetch(`${BASE_URL}/search`, {
