@@ -92,14 +92,14 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 	private _getCardsHtml(): string {
 		const cards = this._changeCards
 			.map((c) => {
-				const changed = c.changed_files.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
-				const more = c.changed_files.length > 5 ? `<li>…and ${c.changed_files.length - 5} more</li>` : '';
+				const changed = c.changed_files.slice(0, 10).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
+				const more = c.changed_files.length > 10 ? `<li>…and ${c.changed_files.length - 10} more</li>` : '';
 
 				return `
 					<section class="card">
 						<header>
 							<div class="title">${escapeHtml(c.summary)}</div>
-							<div class="meta">${escapeHtml(c.author)} • ${new Date(c.created_at).toLocaleString()}</div>
+							<div class="meta">${escapeHtml(c.author)} • ${formatTime(c.created_at)}</div>
 						</header>
 						<div class="body">
 							<div class="label">Changed files</div>
@@ -250,13 +250,52 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			padding: 12px;
 			margin-bottom: 10px;
 			background: color-mix(in srgb, var(--vscode-editor-background) 92%, transparent);
+			cursor: pointer;
+			transition: background 0.15s ease, border-color 0.15s ease;
 		}
-		.card header { margin-bottom: 10px; }
-		.title { font-weight: 800; line-height: 1.2; }
-		.meta { opacity: 0.75; font-size: 12px; margin-top: 3px; }
+		.card:hover { 
+			background: color-mix(in srgb, var(--vscode-editor-background) 80%, transparent); 
+			border-color: var(--vscode-focusBorder);
+		}
+		.card header { 
+			margin-bottom: 0; 
+			position: relative;
+			padding-right: 18px;
+		}
+		.card header::after {
+			content: '';
+			position: absolute;
+			right: 4px;
+			top: 6px;
+			width: 6px;
+			height: 6px;
+			border-right: 1.5px solid var(--vscode-foreground);
+			border-bottom: 1.5px solid var(--vscode-foreground);
+			transform: translateY(-2px) rotate(45deg);
+			opacity: 0;
+			transition: all 0.15s ease;
+		}
+		.card:hover header::after { opacity: 0.6; }
+		.card.expanded header::after {
+			transform: translateY(2px) rotate(-135deg);
+			opacity: 0.6;
+		}
+		.card.expanded header { margin-bottom: 10px; }
+		.title { 
+			font-weight: 800; 
+			line-height: 1.3; 
+			display: -webkit-box;
+			-webkit-line-clamp: 2;
+			-webkit-box-orient: vertical;
+			overflow: hidden;
+		}
+		.card.expanded .title { -webkit-line-clamp: unset; }
+		.meta { opacity: 0.75; font-size: 12px; margin-top: 4px; }
+		.card .body { display: none; }
+		.card.expanded .body { display: block; }
 		.label { opacity: 0.8; font-size: 12px; margin-bottom: 6px; }
 		.files { margin: 0; padding-left: 18px; }
-		.files li { margin: 2px 0; opacity: 0.95; }
+		.files li { margin: 2px 0; opacity: 0.95; word-break: break-all; }
 		code { font-family: var(--vscode-editor-font-family); font-size: 12px; }
 		.note {
 			font-size: 11px;
@@ -305,6 +344,13 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			vscode?.postMessage({ type: 'prepareContext', prompt });
 		}
 
+		document.addEventListener('click', (e) => {
+			const card = e.target.closest('.card');
+			if (card) {
+				card.classList.toggle('expanded');
+			}
+		});
+
 		document.getElementById('broadcast').addEventListener('click', () => {
 			vscode?.postMessage({ type: 'command', command: 'glat.broadcastChanges' });
 		});
@@ -352,6 +398,28 @@ function escapeHtml(input: string): string {
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&#039;');
+}
+
+function formatTime(isoString: string): string {
+	const date = new Date(isoString);
+	const now = new Date();
+	const diffMs = now.getTime() - date.getTime();
+	const diffMins = Math.floor(diffMs / 60000);
+
+	if (diffMins < 60) {
+		return diffMins <= 0 ? 'just now' : `${diffMins}m ago`;
+	}
+
+	const isToday = now.getDate() === date.getDate() && now.getMonth() === date.getMonth() && now.getFullYear() === date.getFullYear();
+	if (isToday) {
+		return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+	}
+
+	const yesterday = new Date(now);
+	yesterday.setDate(yesterday.getDate() - 1);
+	const isYesterday = yesterday.getDate() === date.getDate() && yesterday.getMonth() === date.getMonth() && yesterday.getFullYear() === date.getFullYear();
+	
+	return isYesterday ? 'Yesterday' : date.toLocaleDateString();
 }
 
 function getWorkspaceRoot(): string | undefined {
