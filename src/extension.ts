@@ -411,13 +411,11 @@ ${rawDiff}`;
 	}
 }
 
-async function filterRelevantCardsWithGemini(userPrompt: string, cards: ChangeCard[]): Promise<ChangeCard[]> {
-	if (cards.length === 0) return [];
-
+async function predictImpactedFilesWithGemini(userPrompt: string, availableFiles: string[]): Promise<string[]> {
 	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
 	if (!apiKey) {
-		console.warn('GEMINI_API_KEY not found. Returning recent cards as fallback.');
-		return cards.slice(0, 5);
+		console.warn('GEMINI_API_KEY not found. Cannot predict files.');
+		return [];
 	}
 
 	try {
@@ -427,29 +425,22 @@ async function filterRelevantCardsWithGemini(userPrompt: string, cards: ChangeCa
 			generationConfig: { responseMimeType: 'application/json' }
 		});
 
-		// Pass a minimized version to save tokens
-		const simplifiedCards = cards.map(c => ({
-			id: c.id,
-			summary: c.summary,
-			impacted_files: c.impacted_files
-		}));
-
-		const prompt = `You are an AI context router for a coding assistant.
+		const prompt = `You are an expert AI coding assistant.
 The user wants to accomplish the following task:
 "${userPrompt}"
 
-Here are recent code changes made by teammates across the codebase:
-${JSON.stringify(simplifiedCards, null, 2)}
+Here is the list of all available file paths in the workspace:
+${JSON.stringify(availableFiles)}
 
-Determine which of these teammate changes might be relevant to the user's task. Output JSON with exactly one key: "relevant_ids" (array of strings matching the relevant card ids).`;
+Based on the user's task, predict which of these files are most likely to be modified or needed as context. 
+Output JSON with exactly one key: "predicted_files" (an array of exact file path strings selected from the list).`;
 
 		const result = await model.generateContent(prompt);
 		const parsed = JSON.parse(result.response.text());
-		const relevantIds = new Set<string>(parsed.relevant_ids || []);
-		return cards.filter(c => relevantIds.has(c.id));
+		return parsed.predicted_files || [];
 	} catch (error) {
-		console.error('Failed to filter relevant cards with Gemini:', error);
-		return cards.slice(0, 5); // Fallback to most recent on error
+		console.error('Failed to predict impacted files with Gemini:', error);
+		return [];
 	}
 }
 
@@ -560,15 +551,32 @@ export function activate(context: vscode.ExtensionContext) {
 				const activeRelPath = activeAbsPath ? toWorkspaceRelativePath(activeAbsPath) : undefined;
 				const fileContents = editor?.document.getText();
 
-				let recentCards: ChangeCard[] = [];
-				try {
-					// Fetch the workspace-wide memory pool instead of just the active file
-					recentCards = await supabase.getRecentChangeCards(50);
-				} catch (e) {
-					console.error(e);
+				// 1. Get all files in the workspace, ignoring heavy directories
+				const uris = await vscode.workspace.findFiles('**/*.*', '{node_modules,.git,dist,out,build}/**');
+				const availableFiles = uris.map(uri => toWorkspaceRelativePath(uri.fsPath));
+
+				// 2. Ask Gemini which files the prompt will likely touch
+				const predictedFiles = await predictImpactedFilesWithGemini(userPrompt, availableFiles);
+				
+				// 3. Ensure the current active file is always included in the lookup
+				if (activeRelPath && !predictedFiles.includes(activeRelPath)) {
+					predictedFiles.push(activeRelPath);
 				}
 
-				const relevant = await filterRelevantCardsWithGemini(userPrompt, recentCards);
+				// 4. Fetch cards for the predicted files from Supabase (using the file_card_index table!)
+				const relevantCardsMap = new Map<string, ChangeCard>();
+				
+				for (const filePath of predictedFiles) {
+					try {
+						const cardsForFile = await supabase.getCardsForFile(filePath);
+						for (const card of cardsForFile) {
+							relevantCardsMap.set(card.id, card); // Deduplicate by ID
+						}
+					} catch (e) {
+						console.error(`Failed to fetch cards for ${filePath}:`, e);
+					}
+				}
+				const relevant = Array.from(relevantCardsMap.values());
 
 				const teammateChanges = relevant.length
 					? relevant.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`).join('\n')
