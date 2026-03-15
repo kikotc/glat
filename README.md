@@ -1,71 +1,94 @@
-# glat README
+# GLAT: Multi-Agent Shared Memory Layer 🧠🤝
 
-This is the README for your extension "glat". After writing up a brief description, we recommend including the following sections.
+GLAT (Global Local Agent Transport) is a VS Code extension that acts as a shared memory and context layer for coding agents (like GitHub Copilot). 
 
-## Features
+In modern dev teams, multiple developers and agents work in parallel, but they work in isolation. An agent on Developer B's machine has no idea about the uncommitted local changes Developer A is currently making. GLAT bridges this gap by silently syncing local uncommitted changes to a shared semantic memory pool, empowering agents to collaborate across machines before a single commit is ever made.
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+## ✨ Key Features
+* **Autonomous Background Sync:** Automatically detects file saves, extracts the exact `git diff`, and tracks new files without user intervention.
+* **AI Summarization:** Uses Google's **Gemini 2.5 Flash** to translate noisy syntax diffs into human-readable logical intents.
+* **Enterprise RAG Architecture:** Combines **Moorcheh** (Vector DB for semantic routing) and **Supabase** (Relational DB for syntax/raw code storage) for flawless context retrieval.
+* **Native Copilot Handoff:** Injects the augmented context packet directly into the native VS Code Copilot Chat, maintaining Copilot's powerful "Apply in Editor" capabilities.
+* **Real-time UI:** Live, automatically refreshing timeline of teammate changes right in your VS Code sidebar using WebSockets.
 
-For example if there is an image subfolder under your extension project workspace:
+## 🏗️ Architecture
 
-\!\[feature X\]\(images/feature-x.png\)
+1. **VS Code Extension (The Client):** Handles UI, file system listening, and Git operations.
+2. **Gemini 2.5 Flash (The Intelligence):** Analyzes raw Git diffs, writes human-readable summaries, and predicts impacted files.
+3. **Supabase / PostgreSQL (The Source of Truth):** Stores the heavy, structured data (the raw code diffs, author names, timestamps).
+4. **Moorcheh (The Semantic Search Engine):** A vector database that stores ONLY the AI-generated summaries. It excels at matching a user's natural language prompt ("How does the new login work?") to the mathematical "meaning" of a summary.
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+## 🚀 Setup Instructions
 
-## Requirements
+### Prerequisites
+* Visual Studio Code
+* API Keys for: **Moorcheh**, **Supabase**, and **Google AI Studio (Gemini)**
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+### 1. Database Setup (Supabase)
+1. Create a new Supabase project.
+2. Run the following SQL to create the required tables:
+   ```sql
+   CREATE TABLE change_cards (
+       id uuid PRIMARY KEY,
+       author text NOT NULL,
+       created_at timestamptz NOT NULL,
+       changed_files jsonb NOT NULL,
+       impacted_files jsonb NOT NULL,
+       summary text NOT NULL,
+       raw_diff text
+   );
 
-## Extension Settings
+   CREATE TABLE file_card_index (
+       file_path text NOT NULL,
+       card_id uuid NOT NULL REFERENCES change_cards(id) ON DELETE CASCADE,
+       PRIMARY KEY (file_path, card_id)
+   );
+   ```
+3. Enable **Realtime** for the `change_cards` table in the Supabase Table Editor settings.
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+### 2. Semantic Search Setup (Moorcheh)
+1. Go to your Moorcheh Console.
+2. Navigate to the **Namespaces** tab.
+3. Create a new namespace named **`glat-cards`** and set its type to **Text Namespace**.
 
-For example:
+### 3. Installation (Using .vsix)
+1. Go to the **Releases** page of this GitHub repository and download the `glat-0.0.2.vsix` file.
+2. Open Visual Studio Code and navigate to the **Extensions** view (`Cmd+Shift+X` / `Ctrl+Shift+X`).
+3. Click the **`...`** (Views and More Actions) menu in the top right corner of the Extensions panel.
+4. Select **Install from VSIX...** and choose the downloaded file.
 
-This extension contributes the following settings:
+### 4. Extension Configuration
+1. Open your VS Code Settings (`Cmd + ,` or `Ctrl + ,`).
+2. Search for `GLAT`.
+3. Enter your API credentials in the respective fields:
+   * `Glat: Gemini Api Key`
+   * `Glat: Moorcheh Api Key`
+   * `Glat: Supabase Url`
+   * `Glat: Supabase Anon Key`
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+## 💻 Usage Guide
 
-## Known Issues
+### Broadcasting Changes (Developer A)
+1. Simply write code or have Copilot write code for you.
+2. Save the file.
+3. **Do nothing else!** After 10 seconds of inactivity, GLAT will automatically read the diff, generate a summary, sync it to Moorcheh/Supabase, and stage the files to prepare for the next delta.
+*Note: You can also manually click the "Force Sync" button in the GLAT sidebar.*
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+### Retrieving Context (Developer B)
+1. Open the GLAT sidebar (Activity Bar icon).
+2. Type your prompt in the text box (e.g., *"Refactor the weather component"*).
+3. Press **Enter**.
+4. GLAT will perform a semantic search, retrieve your teammates' uncommitted code, and automatically open your Copilot Chat pre-filled with the exact context and strict instructions. Hit **Send** to let Copilot work its magic!
 
-## Release Notes
+## 🧹 Cleanup
+Finished your feature and pushed to `main`? Click the **"Clear Mine"** button in the GLAT sidebar to safely remove your uncommitted context from the global pool without affecting your teammates' cards.
 
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
+## 🛠️ Building from Source (For Developers)
+If you want to modify the extension or build it yourself:
+1. Clone this repository: `git clone https://github.com/kikotc/glat.git`
+2. Install dependencies: `npm install` (Note: No extra esbuild matchers are required for standard compilation)
+3. Press `F5` in VS Code to compile and launch the Extension Development Host.
 
 ---
 
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+*Built for the 2026 AI Developer Hackathon*
