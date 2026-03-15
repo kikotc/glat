@@ -44,6 +44,10 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 				await vscode.commands.executeCommand('glat.prepareContext', msg.prompt);
 				return;
 			}
+			if (msg.type === 'refresh') {
+				await this.updateView();
+				return;
+			}
 		});
 
 		await this.updateView();
@@ -64,6 +68,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		}
 
 		this._view.webview.html = this._getHtml(this._view.webview);
+		this._view.webview.postMessage({ type: 'refreshComplete' });
 	}
 
 	private _getHtml(webview: vscode.Webview): string {
@@ -145,6 +150,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			gap: 8px;
 			margin-bottom: 10px;
 			flex-wrap: wrap;
+			align-items: center;
 		}
 
 		.main {
@@ -230,6 +236,10 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		.files { margin: 0; padding-left: 18px; }
 		.files li { margin: 2px 0; opacity: 0.95; }
 		code { font-family: var(--vscode-editor-font-family); font-size: 12px; }
+		.note {
+			font-size: 11px;
+			opacity: 0.65;
+		}
 	</style>
 </head>
 <body>
@@ -237,8 +247,9 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		<div class="header">
 			<h1>GLAT • Change Cards</h1>
 			<div class="toolbar">
-				<button id="broadcast">Broadcast</button>
-				<button class="secondary" id="prepare">Prepare Context</button>
+				<button class="secondary" id="refresh" title="Fetch latest cards from Supabase">Refresh</button>
+				<button class="secondary" id="broadcast" title="Manually push your uncommitted changes to the database">Force Sync</button>
+				<span class="note">(Auto-syncs on save)</span>
 			</div>
 		</div>
 
@@ -274,8 +285,16 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		document.getElementById('broadcast').addEventListener('click', () => {
 			vscode?.postMessage({ type: 'command', command: 'glat.broadcastChanges' });
 		});
-		document.getElementById('prepare').addEventListener('click', () => {
-			vscode?.postMessage({ type: 'command', command: 'glat.prepareContext' });
+		document.getElementById('refresh').addEventListener('click', () => {
+			document.getElementById('refresh').textContent = '...';
+			vscode?.postMessage({ type: 'refresh' });
+		});
+
+		window.addEventListener('message', (event) => {
+			if (event.data.type === 'refreshComplete') {
+				const btn = document.getElementById('refresh');
+				if (btn) btn.textContent = 'Refresh';
+			}
 		});
 
 		sendBtn.addEventListener('click', sendPrompt);
@@ -430,6 +449,17 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.registerWebviewViewProvider(GlaTChangeCardsViewProvider.viewType, viewProvider)
 	);
 
+	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+	context.subscriptions.push(
+		vscode.workspace.onDidSaveTextDocument((document) => {
+			if (document.uri.scheme !== 'file') return;
+			if (saveTimeout) clearTimeout(saveTimeout);
+			saveTimeout = setTimeout(() => {
+				vscode.commands.executeCommand('glat.broadcastChanges', true); // true = isAuto
+			}, 10000); // 10-second debounce for background autosaves
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('glat.openPanel', async () => {
 			const panel = vscode.window.createWebviewPanel('glat.panel', 'GLAT', vscode.ViewColumn.One, { enableScripts: true });
@@ -440,10 +470,10 @@ export function activate(context: vscode.ExtensionContext) {
 			</body></html>`;
 		}),
 
-		vscode.commands.registerCommand('glat.broadcastChanges', async () => {
+		vscode.commands.registerCommand('glat.broadcastChanges', async (isAuto: boolean = false) => {
 			const workspaceRoot = getWorkspaceRoot();
 			if (!workspaceRoot) {
-				vscode.window.showErrorMessage('GLAT: No workspace folder found. Open a folder/workspace first.');
+				if (!isAuto) vscode.window.showErrorMessage('GLAT: No workspace folder found. Open a folder/workspace first.');
 				return;
 			}
 
@@ -451,13 +481,13 @@ export function activate(context: vscode.ExtensionContext) {
 			try {
 				({ stdout } = await execInWorkspace('git diff --name-only', workspaceRoot));
 			} catch (e) {
-				vscode.window.showErrorMessage(`GLAT: Failed to read git diff. ${e instanceof Error ? e.message : String(e)}`);
+				if (!isAuto) vscode.window.showErrorMessage(`GLAT: Failed to read git diff. ${e instanceof Error ? e.message : String(e)}`);
 				return;
 			}
 
 			const changedFiles = parseGitNameOnlyOutput(stdout);
 			if (changedFiles.length === 0) {
-				vscode.window.showInformationMessage('GLAT: No local changes detected (git diff was empty).');
+				if (!isAuto) vscode.window.showInformationMessage('GLAT: No local changes detected (git diff was empty).');
 				return;
 			}
 
@@ -466,7 +496,7 @@ export function activate(context: vscode.ExtensionContext) {
 			const author = await getGitAuthorName(workspaceRoot);
 			
 			await vscode.window.withProgress({
-				location: vscode.ProgressLocation.Notification,
+				location: isAuto ? vscode.ProgressLocation.Window : vscode.ProgressLocation.Notification,
 				title: "GLAT: Analyzing and broadcasting changes...",
 				cancellable: false
 			}, async () => {
@@ -484,11 +514,16 @@ export function activate(context: vscode.ExtensionContext) {
 	
 				try {
 					await supabase.insertChangeCard(card);
+					
+					// Automatically stage the files so the next `git diff` is purely incremental!
+					const filesToStage = changedFiles.map(f => `"${f}"`).join(' ');
+					await execInWorkspace(`git add ${filesToStage}`, workspaceRoot);
+
 					await viewProvider.updateView();
-					vscode.window.showInformationMessage(`GLAT: Broadcasted change card with ${changedFiles.length} file(s).`);
+					if (!isAuto) vscode.window.showInformationMessage(`GLAT: Broadcasted and staged ${changedFiles.length} file(s).`);
 				} catch (e) {
 					const errorMessage = e instanceof Error ? e.message : String(e);
-					vscode.window.showErrorMessage(`GLAT: Failed to broadcast change card. ${errorMessage}`);
+					if (!isAuto) vscode.window.showErrorMessage(`GLAT: Failed to broadcast change card. ${errorMessage}`);
 				}
 			});
 		}),
