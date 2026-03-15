@@ -576,7 +576,19 @@ export function activate(context: vscode.ExtensionContext) {
 					  }).join('\n\n')
 					: '- (none)';
 
-				let prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}`;
+				let prompt = `# GLAT Context Packet
+
+> **SYSTEM INSTRUCTION FOR AI:** 
+> The "teammate changes" listed below represent recent work from other developers. They may or may not be merged into your local codebase yet.
+> 1. If you do not see these changes locally, **DO NOT** try to re-implement them.
+> 2. **DO ASSUME** they exist exactly as described and will be available during execution.
+> 3. Ensure your code is compatible with these changes. Use or call them only if they are directly necessary for your current task; do not force integration.
+
+## Task
+${userPrompt}
+
+## Relevant teammate changes
+${teammateChanges}`;
 
 				if (activeRelPath && fileContents) {
 					prompt += `\n\n## Current file\n**${activeRelPath}**${fenceCode(editor?.document.languageId, fileContents)}`;
