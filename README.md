@@ -52,7 +52,7 @@ In modern dev teams, multiple developers and agents work in parallel, but they w
 3. Create a new namespace named **`glat-cards`** and set its type to **Text Namespace**.
 
 ### 3. Installation (Using .vsix)
-1. Go to the **Releases** page of this GitHub repository and download the `glat-0.0.1.vsix` file.
+1. Go to the **Releases** page of this GitHub repository and download the `glat-0.0.2.vsix` file.
 2. Open Visual Studio Code and navigate to the **Extensions** view (`Cmd+Shift+X` / `Ctrl+Shift+X`).
 3. Click the **`...`** (Views and More Actions) menu in the top right corner of the Extensions panel.
 4. Select **Install from VSIX...** and choose the downloaded file.
@@ -71,7 +71,7 @@ In modern dev teams, multiple developers and agents work in parallel, but they w
 ### Broadcasting Changes (Developer A)
 1. Simply write code or have Copilot write code for you.
 2. Save the file.
-3. **Do nothing else!** After 5 seconds of inactivity, GLAT will automatically read the diff, generate a summary, sync it to Moorcheh/Supabase, and stage the files to prepare for the next delta.
+3. **Do nothing else!** After 10 seconds of inactivity, GLAT will automatically read the diff, generate a summary, sync it to Moorcheh/Supabase, and stage the files to prepare for the next delta.
 *Note: You can also manually click the "Force Sync" button in the GLAT sidebar.*
 
 ### Retrieving Context (Developer B)
@@ -91,4 +91,4 @@ If you want to modify the extension or build it yourself:
 
 ---
 
-*Built for the 2026 GenAI Genesis Hackathon*
+*Built for the 2026 AI Developer Hackathon*
