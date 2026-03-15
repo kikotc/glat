@@ -30,6 +30,11 @@
           "type": "string",
           "default": "",
           "description": "Supabase Anonymous Key for the database."
+        },
+        "glat.moorchehApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Moorcheh API Key for semantic memory retrieval."
         }
       }
     },
@@ -45,6 +50,10 @@
       {
         "command": "glat.prepareContext",
         "title": "GLAT: Prepare Context for Copilot"
+      },
+      {
+        "command": "glat.clearContext",
+        "title": "GLAT: Clear My Broadcasted Context"
       }
     ],
     "viewsContainers": {

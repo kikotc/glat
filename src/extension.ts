@@ -5,6 +5,7 @@ import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as supabase from './supabase';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as moorcheh from './moorcheh';
 
 export type ChangeCard = {
 	id: string;
@@ -21,6 +22,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 
 	private _view?: vscode.WebviewView;
 	private _changeCards: ChangeCard[] = [];
+	private _subscription?: { unsubscribe: () => void };
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -48,9 +50,25 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 				await this.updateView();
 				return;
 			}
+			if (msg.type === 'clear') {
+				await vscode.commands.executeCommand('glat.clearContext');
+				return;
+			}
 		});
 
+		webviewView.onDidDispose(() => {
+			if (this._subscription) {
+				this._subscription.unsubscribe();
+			}
+		});
+
+		webviewView.webview.html = this._getHtml(webviewView.webview);
+
 		await this.updateView();
+
+		this._subscription = supabase.subscribeToChanges(() => {
+			this.updateView();
+		});
 	}
 
 	public async updateView(): Promise<void> {
@@ -67,21 +85,21 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			vscode.window.showErrorMessage(`GLAT: Failed to fetch change cards. ${errorMessage}`);
 		}
 
-		this._view.webview.html = this._getHtml(this._view.webview);
+		this._view.webview.postMessage({ type: 'updateCards', html: this._getCardsHtml() });
 		this._view.webview.postMessage({ type: 'refreshComplete' });
 	}
 
-	private _getHtml(webview: vscode.Webview): string {
+	private _getCardsHtml(): string {
 		const cards = this._changeCards
 			.map((c) => {
-				const changed = c.changed_files.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
-				const more = c.changed_files.length > 5 ? `<li>…and ${c.changed_files.length - 5} more</li>` : '';
+				const changed = c.changed_files.slice(0, 10).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
+				const more = c.changed_files.length > 10 ? `<li>…and ${c.changed_files.length - 10} more</li>` : '';
 
 				return `
 					<section class="card">
 						<header>
 							<div class="title">${escapeHtml(c.summary)}</div>
-							<div class="meta">${escapeHtml(c.author)} • ${new Date(c.created_at).toLocaleString()}</div>
+							<div class="meta">${escapeHtml(c.author)} • ${formatTime(c.created_at)}</div>
 						</header>
 						<div class="body">
 							<div class="label">Changed files</div>
@@ -99,6 +117,10 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			</div>
 		`;
 
+		return this._changeCards.length ? cards : empty;
+	}
+
+	private _getHtml(webview: vscode.Webview): string {
 		return `<!doctype html>
 <html lang="en">
 <head>
@@ -228,13 +250,52 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			padding: 12px;
 			margin-bottom: 10px;
 			background: color-mix(in srgb, var(--vscode-editor-background) 92%, transparent);
+			cursor: pointer;
+			transition: background 0.15s ease, border-color 0.15s ease;
 		}
-		.card header { margin-bottom: 10px; }
-		.title { font-weight: 800; line-height: 1.2; }
-		.meta { opacity: 0.75; font-size: 12px; margin-top: 3px; }
+		.card:hover { 
+			background: color-mix(in srgb, var(--vscode-editor-background) 80%, transparent); 
+			border-color: var(--vscode-focusBorder);
+		}
+		.card header { 
+			margin-bottom: 0; 
+			position: relative;
+			padding-right: 18px;
+		}
+		.card header::after {
+			content: '';
+			position: absolute;
+			right: 4px;
+			top: 6px;
+			width: 6px;
+			height: 6px;
+			border-right: 1.5px solid var(--vscode-foreground);
+			border-bottom: 1.5px solid var(--vscode-foreground);
+			transform: translateY(-2px) rotate(45deg);
+			opacity: 0;
+			transition: all 0.15s ease;
+		}
+		.card:hover header::after { opacity: 0.6; }
+		.card.expanded header::after {
+			transform: translateY(2px) rotate(-135deg);
+			opacity: 0.6;
+		}
+		.card.expanded header { margin-bottom: 10px; }
+		.title { 
+			font-weight: 800; 
+			line-height: 1.3; 
+			display: -webkit-box;
+			-webkit-line-clamp: 2;
+			-webkit-box-orient: vertical;
+			overflow: hidden;
+		}
+		.card.expanded .title { -webkit-line-clamp: unset; }
+		.meta { opacity: 0.75; font-size: 12px; margin-top: 4px; }
+		.card .body { display: none; }
+		.card.expanded .body { display: block; }
 		.label { opacity: 0.8; font-size: 12px; margin-bottom: 6px; }
 		.files { margin: 0; padding-left: 18px; }
-		.files li { margin: 2px 0; opacity: 0.95; }
+		.files li { margin: 2px 0; opacity: 0.95; word-break: break-all; }
 		code { font-family: var(--vscode-editor-font-family); font-size: 12px; }
 		.note {
 			font-size: 11px;
@@ -249,12 +310,13 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			<div class="toolbar">
 				<button class="secondary" id="refresh" title="Fetch latest cards from Supabase">Refresh</button>
 				<button class="secondary" id="broadcast" title="Manually push your uncommitted changes to the database">Force Sync</button>
+				<button class="secondary" id="clear" title="Delete all your broadcasted cards">Clear Mine</button>
 				<span class="note">(Auto-syncs on save)</span>
 			</div>
 		</div>
 
-		<div class="main">
-			${this._changeCards.length ? cards : empty}
+		<div class="main" id="cards-container">
+			${this._getCardsHtml()}
 		</div>
 
 		<div class="composer">
@@ -282,6 +344,13 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			vscode?.postMessage({ type: 'prepareContext', prompt });
 		}
 
+		document.addEventListener('click', (e) => {
+			const card = e.target.closest('.card');
+			if (card) {
+				card.classList.toggle('expanded');
+			}
+		});
+
 		document.getElementById('broadcast').addEventListener('click', () => {
 			vscode?.postMessage({ type: 'command', command: 'glat.broadcastChanges' });
 		});
@@ -289,11 +358,19 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			document.getElementById('refresh').textContent = '...';
 			vscode?.postMessage({ type: 'refresh' });
 		});
+		document.getElementById('clear').addEventListener('click', () => {
+			if (confirm('Are you sure you want to delete all your broadcasted context?')) {
+				vscode?.postMessage({ type: 'clear' });
+			}
+		});
 
 		window.addEventListener('message', (event) => {
 			if (event.data.type === 'refreshComplete') {
 				const btn = document.getElementById('refresh');
 				if (btn) btn.textContent = 'Refresh';
+			} else if (event.data.type === 'updateCards') {
+				const container = document.getElementById('cards-container');
+				if (container) container.innerHTML = event.data.html;
 			}
 		});
 
@@ -321,6 +398,28 @@ function escapeHtml(input: string): string {
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&#039;');
+}
+
+function formatTime(isoString: string): string {
+	const date = new Date(isoString);
+	const now = new Date();
+	const diffMs = now.getTime() - date.getTime();
+	const diffMins = Math.floor(diffMs / 60000);
+
+	if (diffMins < 60) {
+		return diffMins <= 0 ? 'just now' : `${diffMins}m ago`;
+	}
+
+	const isToday = now.getDate() === date.getDate() && now.getMonth() === date.getMonth() && now.getFullYear() === date.getFullYear();
+	if (isToday) {
+		return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+	}
+
+	const yesterday = new Date(now);
+	yesterday.setDate(yesterday.getDate() - 1);
+	const isYesterday = yesterday.getDate() === date.getDate() && yesterday.getMonth() === date.getMonth() && yesterday.getFullYear() === date.getFullYear();
+	
+	return isYesterday ? 'Yesterday' : date.toLocaleDateString();
 }
 
 function getWorkspaceRoot(): string | undefined {
@@ -401,48 +500,6 @@ ${rawDiff}`;
 	}
 }
 
-async function filterRelevantCardsWithGemini(userPrompt: string, cards: ChangeCard[]): Promise<ChangeCard[]> {
-	if (cards.length === 0) return [];
-
-	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
-	if (!apiKey) {
-		console.warn('GEMINI_API_KEY not found. Returning recent cards as fallback.');
-		return cards.slice(0, 5);
-	}
-
-	try {
-		const genAI = new GoogleGenerativeAI(apiKey);
-		const model = genAI.getGenerativeModel({
-			model: 'gemini-2.5-flash',
-			generationConfig: { responseMimeType: 'application/json' }
-		});
-
-		// Pass a minimized version to save tokens
-		const simplifiedCards = cards.map(c => ({
-			id: c.id,
-			summary: c.summary,
-			impacted_files: c.impacted_files
-		}));
-
-		const prompt = `You are an AI context router for a coding assistant.
-The user wants to accomplish the following task:
-"${userPrompt}"
-
-Here are recent code changes made by teammates across the codebase:
-${JSON.stringify(simplifiedCards, null, 2)}
-
-Determine which of these teammate changes might be relevant to the user's task. Output JSON with exactly one key: "relevant_ids" (array of strings matching the relevant card ids).`;
-
-		const result = await model.generateContent(prompt);
-		const parsed = JSON.parse(result.response.text());
-		const relevantIds = new Set<string>(parsed.relevant_ids || []);
-		return cards.filter(c => relevantIds.has(c.id));
-	} catch (error) {
-		console.error('Failed to filter relevant cards with Gemini:', error);
-		return cards.slice(0, 5); // Fallback to most recent on error
-	}
-}
-
 export function activate(context: vscode.ExtensionContext) {
 	const viewProvider = new GlaTChangeCardsViewProvider(context.extensionUri);
 	context.subscriptions.push(
@@ -479,6 +536,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 			let stdout: string;
 			try {
+				// Trick Git into tracking new/untracked files so their contents appear in `git diff`
+				await execInWorkspace('git add -N .', workspaceRoot);
 				({ stdout } = await execInWorkspace('git diff --name-only', workspaceRoot));
 			} catch (e) {
 				if (!isAuto) vscode.window.showErrorMessage(`GLAT: Failed to read git diff. ${e instanceof Error ? e.message : String(e)}`);
@@ -515,6 +574,13 @@ export function activate(context: vscode.ExtensionContext) {
 				try {
 					await supabase.insertChangeCard(card);
 					
+					// Upload the summary to Moorcheh's semantic memory
+					try {
+						await moorcheh.uploadSummary(card);
+					} catch (moorchehError) {
+						console.error('Failed to upload to Moorcheh:', moorchehError);
+					}
+
 					// Automatically stage the files so the next `git diff` is purely incremental!
 					const filesToStage = changedFiles.map(f => `"${f}"`).join(' ');
 					await execInWorkspace(`git add ${filesToStage}`, workspaceRoot);
@@ -550,21 +616,56 @@ export function activate(context: vscode.ExtensionContext) {
 				const activeRelPath = activeAbsPath ? toWorkspaceRelativePath(activeAbsPath) : undefined;
 				const fileContents = editor?.document.getText();
 
-				let recentCards: ChangeCard[] = [];
+				const relevantCardsMap = new Map<string, ChangeCard>();
+
+				// 1. Ask Moorcheh for the most relevant teammate changes based on the prompt
 				try {
-					// Fetch the workspace-wide memory pool instead of just the active file
-					recentCards = await supabase.getRecentChangeCards(50);
+					const relevantCardIds = await moorcheh.searchRelevantCards(userPrompt);
+					const moorchehCards = await supabase.getCardsByIds(relevantCardIds);
+					for (const card of moorchehCards) {
+						relevantCardsMap.set(card.id, card);
+					}
 				} catch (e) {
-					console.error(e);
+					console.error('Moorcheh search failed:', e);
 				}
 
-				const relevant = await filterRelevantCardsWithGemini(userPrompt, recentCards);
+				// 2. Always include context for the file the user currently has open
+				if (activeRelPath) {
+					try {
+						const activeFileCards = await supabase.getCardsForFile(activeRelPath);
+						for (const card of activeFileCards) {
+							relevantCardsMap.set(card.id, card);
+						}
+					} catch (e) {
+						console.error(`Failed to fetch cards for active file:`, e);
+					}
+				}
+
+				const relevant = Array.from(relevantCardsMap.values());
 
 				const teammateChanges = relevant.length
-					? relevant.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`).join('\n')
+					? relevant.map((c) => {
+							let text = `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`;
+							if (c.raw_diff) {
+								text += `\n\`\`\`diff\n${c.raw_diff}\n\`\`\``;
+							}
+							return text;
+					  }).join('\n\n')
 					: '- (none)';
 
-				let prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}`;
+				let prompt = `# GLAT Context Packet
+
+> **SYSTEM INSTRUCTION FOR AI:** 
+> The "teammate changes" listed below represent recent work from other developers. They may or may not be merged into your local codebase yet.
+> 1. If you do not see these changes locally, **DO NOT** try to re-implement them.
+> 2. **DO ASSUME** they exist exactly as described and will be available during execution.
+> 3. Ensure your code is compatible with these changes. Use or call them only if they are directly necessary for your current task; do not force integration.
+
+## Task
+${userPrompt}
+
+## Relevant teammate changes
+${teammateChanges}`;
 
 				if (activeRelPath && fileContents) {
 					prompt += `\n\n## Current file\n**${activeRelPath}**${fenceCode(editor?.document.languageId, fileContents)}`;
@@ -572,11 +673,29 @@ export function activate(context: vscode.ExtensionContext) {
 					prompt += `\n\n*(No active file provided)*`;
 				}
 
-				await vscode.env.clipboard.writeText(prompt);
-				const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
-				await vscode.window.showTextDocument(doc, { preview: false });
-				vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
+				// Open the native VS Code Chat (Copilot) and pre-fill it with our packet
+				await vscode.commands.executeCommand('workbench.action.chat.open', { query: prompt });
+				vscode.window.showInformationMessage('GLAT: Context sent to Copilot Chat!');
 			});
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('glat.clearContext', async () => {
+			const workspaceRoot = getWorkspaceRoot();
+			if (!workspaceRoot) {
+				vscode.window.showErrorMessage('GLAT: No workspace folder found.');
+				return;
+			}
+
+			const author = await getGitAuthorName(workspaceRoot);
+			try {
+				await supabase.deleteUserCards(author);
+				await viewProvider.updateView();
+				vscode.window.showInformationMessage(`GLAT: Cleared all change cards for ${author}.`);
+			} catch (e) {
+				vscode.window.showErrorMessage(`GLAT: Failed to clear context. ${e instanceof Error ? e.message : String(e)}`);
+			}
 		})
 	);
 }
