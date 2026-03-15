@@ -48,6 +48,10 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 				await this.updateView();
 				return;
 			}
+			if (msg.type === 'clear') {
+				await vscode.commands.executeCommand('glat.clearContext');
+				return;
+			}
 		});
 
 		await this.updateView();
@@ -249,6 +253,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			<div class="toolbar">
 				<button class="secondary" id="refresh" title="Fetch latest cards from Supabase">Refresh</button>
 				<button class="secondary" id="broadcast" title="Manually push your uncommitted changes to the database">Force Sync</button>
+				<button class="secondary" id="clear" title="Delete all your broadcasted cards">Clear Mine</button>
 				<span class="note">(Auto-syncs on save)</span>
 			</div>
 		</div>
@@ -288,6 +293,11 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		document.getElementById('refresh').addEventListener('click', () => {
 			document.getElementById('refresh').textContent = '...';
 			vscode?.postMessage({ type: 'refresh' });
+		});
+		document.getElementById('clear').addEventListener('click', () => {
+			if (confirm('Are you sure you want to delete all your broadcasted context?')) {
+				vscode?.postMessage({ type: 'clear' });
+			}
 		});
 
 		window.addEventListener('message', (event) => {
@@ -577,6 +587,25 @@ export function activate(context: vscode.ExtensionContext) {
 				await vscode.window.showTextDocument(doc, { preview: false });
 				vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
 			});
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('glat.clearContext', async () => {
+			const workspaceRoot = getWorkspaceRoot();
+			if (!workspaceRoot) {
+				vscode.window.showErrorMessage('GLAT: No workspace folder found.');
+				return;
+			}
+
+			const author = await getGitAuthorName(workspaceRoot);
+			try {
+				await supabase.deleteUserCards(author);
+				await viewProvider.updateView();
+				vscode.window.showInformationMessage(`GLAT: Cleared all change cards for ${author}.`);
+			} catch (e) {
+				vscode.window.showErrorMessage(`GLAT: Failed to clear context. ${e instanceof Error ? e.message : String(e)}`);
+			}
 		})
 	);
 }

@@ -86,3 +86,13 @@ export async function getRecentChangeCards(limit = 50): Promise<ChangeCard[]> {
 
 	return (data as ChangeCard[]) || [];
 }
+
+export async function deleteUserCards(author: string): Promise<void> {
+	const client = getSupabaseClient();
+	const { error } = await client.from('change_cards').delete().eq('author', author);
+	
+	if (error) {
+		console.error('Error deleting user cards:', error);
+		throw new Error(`Failed to clear context: ${error.message}`);
+	}
+}

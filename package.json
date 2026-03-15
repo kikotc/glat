@@ -45,6 +45,10 @@
       {
         "command": "glat.prepareContext",
         "title": "GLAT: Prepare Context for Copilot"
+      },
+      {
+        "command": "glat.clearContext",
+        "title": "GLAT: Clear My Broadcasted Context"
       }
     ],
     "viewsContainers": {
