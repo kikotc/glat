@@ -1,25 +1,30 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
+import { exec } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import * as supabase from './supabase';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-type ChangeCard = {
+export type ChangeCard = {
+	id: string;
 	author: string;
-	timestamp: string;
-	changedFiles: string[];
-	impactedFiles: string[];
+	created_at: string;
+	changed_files: string[];
+	impacted_files: string[];
 	summary: string;
+	raw_diff: string | null;
 };
-
-const changeCards: ChangeCard[] = [];
 
 class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'glat.changeCardsView';
 
 	private _view?: vscode.WebviewView;
+	private _changeCards: ChangeCard[] = [];
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
-	resolveWebviewView(webviewView: vscode.WebviewView): void {
+	async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
 		this._view = webviewView;
 
 		webviewView.webview.options = {
@@ -27,29 +32,56 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			localResourceRoots: [this._extensionUri]
 		};
 
-		webviewView.webview.html = this._getHtml(webviewView.webview);
+		webviewView.webview.onDidReceiveMessage(async (msg) => {
+			if (!msg) {
+				return;
+			}
+			if (msg.type === 'command' && typeof msg.command === 'string') {
+				await vscode.commands.executeCommand(msg.command);
+				return;
+			}
+			if (msg.type === 'prepareContext' && typeof msg.prompt === 'string') {
+				await vscode.commands.executeCommand('glat.prepareContext', msg.prompt);
+				return;
+			}
+			if (msg.type === 'refresh') {
+				await this.updateView();
+				return;
+			}
+		});
+
+		await this.updateView();
 	}
 
-	public refresh(): void {
+	public async updateView(): Promise<void> {
 		if (!this._view) {
 			return;
 		}
+
+		try {
+			this._changeCards = await supabase.getRecentChangeCards();
+		} catch (e) {
+			this._changeCards = [];
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			console.error(e);
+			vscode.window.showErrorMessage(`GLAT: Failed to fetch change cards. ${errorMessage}`);
+		}
+
 		this._view.webview.html = this._getHtml(this._view.webview);
+		this._view.webview.postMessage({ type: 'refreshComplete' });
 	}
 
 	private _getHtml(webview: vscode.Webview): string {
-		const cards = changeCards
-			.slice()
-			.reverse()
+		const cards = this._changeCards
 			.map((c) => {
-				const changed = c.changedFiles.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
-				const more = c.changedFiles.length > 5 ? `<li>…and ${c.changedFiles.length - 5} more</li>` : '';
+				const changed = c.changed_files.slice(0, 5).map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
+				const more = c.changed_files.length > 5 ? `<li>…and ${c.changed_files.length - 5} more</li>` : '';
 
 				return `
 					<section class="card">
 						<header>
 							<div class="title">${escapeHtml(c.summary)}</div>
-							<div class="meta">${escapeHtml(c.author)} • ${new Date(c.timestamp).toLocaleString()}</div>
+							<div class="meta">${escapeHtml(c.author)} • ${new Date(c.created_at).toLocaleString()}</div>
 						</header>
 						<div class="body">
 							<div class="label">Changed files</div>
@@ -84,13 +116,29 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		   doesn't collapse/overflow badly below a minimum. */
 		body {
 			min-width: var(--minWidth);
-			padding: var(--pad);
+			padding: 0;
+			margin: 0;
 			color: var(--vscode-foreground);
 			font-family: var(--vscode-font-family);
 			font-size: var(--vscode-font-size);
 			box-sizing: border-box;
+			height: 100vh;
+			overflow: hidden;
 		}
 		*, *::before, *::after { box-sizing: inherit; }
+
+		.shell {
+			display: flex;
+			flex-direction: column;
+			height: 100vh;
+			min-width: var(--minWidth);
+		}
+
+		.header {
+			padding: var(--pad);
+			padding-bottom: 0;
+		}
+
 		h1 {
 			margin: 0 0 10px;
 			font-size: 14px;
@@ -100,9 +148,51 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		.toolbar {
 			display: flex;
 			gap: 8px;
-			margin-bottom: 12px;
+			margin-bottom: 10px;
 			flex-wrap: wrap;
+			align-items: center;
 		}
+
+		.main {
+			flex: 1;
+			overflow: auto;
+			padding: var(--pad);
+			padding-top: 8px;
+		}
+
+		.composer {
+			padding: var(--pad);
+			border-top: 1px solid var(--border);
+			background: color-mix(in srgb, var(--vscode-editor-background) 96%, transparent);
+		}
+		.promptRow {
+			display: flex;
+			gap: 8px;
+			align-items: flex-end;
+		}
+
+		textarea {
+			flex: 1;
+			min-width: 0;
+			padding: 7px 10px;
+			border-radius: 8px;
+			border: 1px solid var(--border);
+			background: var(--vscode-input-background);
+			color: var(--vscode-input-foreground);
+			outline: none;
+			resize: none;
+			overflow-y: auto;
+			overflow-x: hidden;
+			white-space: pre-wrap;
+			word-break: break-word;
+			line-height: 1.35;
+			font-family: var(--vscode-font-family);
+			font-size: var(--vscode-font-size);
+		}
+		textarea:focus {
+			border-color: var(--vscode-focusBorder);
+		}
+
 		button {
 			appearance: none;
 			border: 1px solid var(--border);
@@ -118,23 +208,12 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			text-overflow: ellipsis;
 			transition: filter 120ms ease, transform 60ms ease;
 		}
-		button:hover {
-			filter: brightness(0.92);
-		}
-		button:active {
-			filter: brightness(0.86);
-			transform: translateY(0.5px);
-		}
-		button.secondary {
-			background: transparent;
-			color: var(--vscode-foreground);
-		}
-		button.secondary:hover {
-			background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
-		}
-		button.secondary:active {
-			background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
-		}
+		button:hover { filter: brightness(0.92); }
+		button:active { filter: brightness(0.86); transform: translateY(0.5px); }
+		button.secondary { background: transparent; color: var(--vscode-foreground); }
+		button.secondary:hover { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
+		button.secondary:active { background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); }
+
 		.empty {
 			padding: 18px 12px;
 			border: 1px dashed var(--border);
@@ -157,23 +236,77 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 		.files { margin: 0; padding-left: 18px; }
 		.files li { margin: 2px 0; opacity: 0.95; }
 		code { font-family: var(--vscode-editor-font-family); font-size: 12px; }
+		.note {
+			font-size: 11px;
+			opacity: 0.65;
+		}
 	</style>
 </head>
 <body>
-	<h1>GLAT • Change Cards</h1>
-	<div class="toolbar">
-		<button id="broadcast">Broadcast</button>
-		<button class="secondary" id="prepare">Prepare Context</button>
+	<div class="shell">
+		<div class="header">
+			<h1>GLAT • Change Cards</h1>
+			<div class="toolbar">
+				<button class="secondary" id="refresh" title="Fetch latest cards from Supabase">Refresh</button>
+				<button class="secondary" id="broadcast" title="Manually push your uncommitted changes to the database">Force Sync</button>
+				<span class="note">(Auto-syncs on save)</span>
+			</div>
+		</div>
+
+		<div class="main">
+			${this._changeCards.length ? cards : empty}
+		</div>
+
+		<div class="composer">
+			<div class="promptRow">
+				<textarea id="prompt" rows="2" placeholder="Ask Copilot… (GLAT will add teammate context)"></textarea>
+				<button class="send" id="send">Enter</button>
+			</div>
+		</div>
 	</div>
-	${changeCards.length ? cards : empty}
 
 	<script>
 		const vscode = acquireVsCodeApi?.();
+
+		const promptEl = document.getElementById('prompt');
+		const sendBtn = document.getElementById('send');
+
+		function autoSize() {
+			promptEl.style.height = 'auto';
+			promptEl.style.height = Math.min(promptEl.scrollHeight, 140) + 'px';
+		}
+
+		function sendPrompt() {
+			const prompt = (promptEl.value || '').trim();
+			if (!prompt) return;
+			vscode?.postMessage({ type: 'prepareContext', prompt });
+		}
+
 		document.getElementById('broadcast').addEventListener('click', () => {
 			vscode?.postMessage({ type: 'command', command: 'glat.broadcastChanges' });
 		});
-		document.getElementById('prepare').addEventListener('click', () => {
-			vscode?.postMessage({ type: 'command', command: 'glat.prepareContext' });
+		document.getElementById('refresh').addEventListener('click', () => {
+			document.getElementById('refresh').textContent = '...';
+			vscode?.postMessage({ type: 'refresh' });
+		});
+
+		window.addEventListener('message', (event) => {
+			if (event.data.type === 'refreshComplete') {
+				const btn = document.getElementById('refresh');
+				if (btn) btn.textContent = 'Refresh';
+			}
+		});
+
+		sendBtn.addEventListener('click', sendPrompt);
+		promptEl.addEventListener('input', autoSize);
+		autoSize();
+
+		promptEl.addEventListener('keydown', (e) => {
+			// Enter submits; Shift+Enter inserts a newline
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				sendPrompt();
+			}
 		});
 	</script>
 </body>
@@ -195,20 +328,141 @@ function getWorkspaceRoot(): string | undefined {
 	return folder?.uri.fsPath;
 }
 
+function execInWorkspace(command: string, cwd: string): Promise<{ stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		exec(command, { cwd, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+			if (err) {
+				reject(new Error(stderr?.toString() || err.message));
+				return;
+			}
+			resolve({ stdout: stdout?.toString() ?? '', stderr: stderr?.toString() ?? '' });
+		});
+	});
+}
+
+async function getGitAuthorName(workspaceRoot: string): Promise<string> {
+	try {
+		const { stdout } = await execInWorkspace('git config user.name', workspaceRoot);
+		const name = stdout.trim();
+		return name || 'developer';
+	} catch {
+		return 'developer';
+	}
+}
+
+function toWorkspaceRelativePath(absPath: string): string {
+	return vscode.workspace.asRelativePath(absPath, false);
+}
+
+function parseGitNameOnlyOutput(stdout: string): string[] {
+	return stdout
+			.trim()
+			.split(/\r?\n/)
+			.map((s) => s.trim())
+			.filter(Boolean);
+}
+
+function fenceCode(languageId: string | undefined, content: string): string {
+	const lang = languageId && languageId !== 'plaintext' ? languageId : '';
+	return `\n\n\`\`\`${lang}\n${content}\n\`\`\`\n`;
+}
+
+async function generateSmartCardData(rawDiff: string, changedFiles: string[]): Promise<{ summary: string; impacted_files: string[] }> {
+	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
+	if (!apiKey) {
+		console.warn('GEMINI_API_KEY not found. Falling back to generic summary.');
+		return {
+			summary: `Local code changes detected (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'})`,
+			impacted_files: changedFiles
+		};
+	}
+
+	try {
+		const genAI = new GoogleGenerativeAI(apiKey);
+		const model = genAI.getGenerativeModel({
+			model: 'gemini-2.5-flash',
+			generationConfig: { responseMimeType: 'application/json' }
+		});
+
+		const prompt = `You are an expert developer assistant. Analyze the given git diff and provide a concise, 1-2 sentence human-readable summary of the changes. Also, predict an array of other files in the project that might be impacted by this change (e.g., if a function signature changes, where might it be called?). Output JSON with exactly two keys: "summary" (string) and "impacted_files" (array of strings, always including the originally changed files).
+
+Changed Files:
+${changedFiles.join('\n')}
+
+Git Diff:
+${rawDiff}`;
+
+		const result = await model.generateContent(prompt);
+		const parsed = JSON.parse(result.response.text());
+		return { summary: parsed.summary || 'Local changes detected', impacted_files: parsed.impacted_files || changedFiles };
+	} catch (error) {
+		console.error('Failed to generate smart summary with Gemini:', error);
+		return { summary: 'Local code changes detected (fallback)', impacted_files: changedFiles };
+	}
+}
+
+async function filterRelevantCardsWithGemini(userPrompt: string, cards: ChangeCard[]): Promise<ChangeCard[]> {
+	if (cards.length === 0) return [];
+
+	const apiKey = vscode.workspace.getConfiguration('glat').get<string>('geminiApiKey');
+	if (!apiKey) {
+		console.warn('GEMINI_API_KEY not found. Returning recent cards as fallback.');
+		return cards.slice(0, 5);
+	}
+
+	try {
+		const genAI = new GoogleGenerativeAI(apiKey);
+		const model = genAI.getGenerativeModel({
+			model: 'gemini-2.5-flash',
+			generationConfig: { responseMimeType: 'application/json' }
+		});
+
+		// Pass a minimized version to save tokens
+		const simplifiedCards = cards.map(c => ({
+			id: c.id,
+			summary: c.summary,
+			impacted_files: c.impacted_files
+		}));
+
+		const prompt = `You are an AI context router for a coding assistant.
+The user wants to accomplish the following task:
+"${userPrompt}"
+
+Here are recent code changes made by teammates across the codebase:
+${JSON.stringify(simplifiedCards, null, 2)}
+
+Determine which of these teammate changes might be relevant to the user's task. Output JSON with exactly one key: "relevant_ids" (array of strings matching the relevant card ids).`;
+
+		const result = await model.generateContent(prompt);
+		const parsed = JSON.parse(result.response.text());
+		const relevantIds = new Set<string>(parsed.relevant_ids || []);
+		return cards.filter(c => relevantIds.has(c.id));
+	} catch (error) {
+		console.error('Failed to filter relevant cards with Gemini:', error);
+		return cards.slice(0, 5); // Fallback to most recent on error
+	}
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	const viewProvider = new GlaTChangeCardsViewProvider(context.extensionUri);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(GlaTChangeCardsViewProvider.viewType, viewProvider)
 	);
 
+	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+	context.subscriptions.push(
+		vscode.workspace.onDidSaveTextDocument((document) => {
+			if (document.uri.scheme !== 'file') return;
+			if (saveTimeout) clearTimeout(saveTimeout);
+			saveTimeout = setTimeout(() => {
+				vscode.commands.executeCommand('glat.broadcastChanges', true); // true = isAuto
+			}, 10000); // 10-second debounce for background autosaves
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('glat.openPanel', async () => {
-			const panel = vscode.window.createWebviewPanel(
-				'glat.panel',
-				'GLAT',
-				vscode.ViewColumn.One,
-				{ enableScripts: true }
-			);
+			const panel = vscode.window.createWebviewPanel('glat.panel', 'GLAT', vscode.ViewColumn.One, { enableScripts: true });
 			panel.webview.html = `<!doctype html>
 			<html><body style="padding:12px;font-family:var(--vscode-font-family);color:var(--vscode-foreground)">
 				<h2 style="margin:0 0 8px">GLAT</h2>
@@ -216,23 +470,113 @@ export function activate(context: vscode.ExtensionContext) {
 			</body></html>`;
 		}),
 
-		// UI frame commands (backend will be added next)
-		vscode.commands.registerCommand('glat.broadcastChanges', async () => {
-			// Placeholder: create a fake card so the UI is visible.
-			const root = getWorkspaceRoot();
-			changeCards.push({
-				author: 'developer',
-				timestamp: new Date().toISOString(),
-				changedFiles: root ? ['(example) src/extension.ts'] : ['(example) no workspace opened'],
-				impactedFiles: root ? ['(example) src/extension.ts'] : ['(example) no workspace opened'],
-				summary: 'Local code changes detected (UI placeholder)'
+		vscode.commands.registerCommand('glat.broadcastChanges', async (isAuto: boolean = false) => {
+			const workspaceRoot = getWorkspaceRoot();
+			if (!workspaceRoot) {
+				if (!isAuto) vscode.window.showErrorMessage('GLAT: No workspace folder found. Open a folder/workspace first.');
+				return;
+			}
+
+			let stdout: string;
+			try {
+				({ stdout } = await execInWorkspace('git diff --name-only', workspaceRoot));
+			} catch (e) {
+				if (!isAuto) vscode.window.showErrorMessage(`GLAT: Failed to read git diff. ${e instanceof Error ? e.message : String(e)}`);
+				return;
+			}
+
+			const changedFiles = parseGitNameOnlyOutput(stdout);
+			if (changedFiles.length === 0) {
+				if (!isAuto) vscode.window.showInformationMessage('GLAT: No local changes detected (git diff was empty).');
+				return;
+			}
+
+			const { stdout: rawDiff } = await execInWorkspace('git diff', workspaceRoot);
+
+			const author = await getGitAuthorName(workspaceRoot);
+			
+			await vscode.window.withProgress({
+				location: isAuto ? vscode.ProgressLocation.Window : vscode.ProgressLocation.Notification,
+				title: "GLAT: Analyzing and broadcasting changes...",
+				cancellable: false
+			}, async () => {
+				const smartData = await generateSmartCardData(rawDiff, changedFiles);
+	
+				const card: ChangeCard = {
+					id: randomUUID(),
+					author,
+					created_at: new Date().toISOString(),
+					changed_files: changedFiles,
+					impacted_files: smartData.impacted_files,
+					summary: smartData.summary,
+					raw_diff: rawDiff
+				};
+	
+				try {
+					await supabase.insertChangeCard(card);
+					
+					// Automatically stage the files so the next `git diff` is purely incremental!
+					const filesToStage = changedFiles.map(f => `"${f}"`).join(' ');
+					await execInWorkspace(`git add ${filesToStage}`, workspaceRoot);
+
+					await viewProvider.updateView();
+					if (!isAuto) vscode.window.showInformationMessage(`GLAT: Broadcasted and staged ${changedFiles.length} file(s).`);
+				} catch (e) {
+					const errorMessage = e instanceof Error ? e.message : String(e);
+					if (!isAuto) vscode.window.showErrorMessage(`GLAT: Failed to broadcast change card. ${errorMessage}`);
+				}
 			});
-			viewProvider.refresh();
-			vscode.window.showInformationMessage('GLAT: Added a placeholder change card (UI only).');
 		}),
 
-		vscode.commands.registerCommand('glat.prepareContext', async () => {
-			vscode.window.showInformationMessage('GLAT: Prepare Context (UI placeholder). Backend wiring next.');
+		vscode.commands.registerCommand('glat.prepareContext', async (providedPrompt?: string) => {
+			const userPrompt =
+				typeof providedPrompt === 'string' && providedPrompt.trim().length > 0
+					? providedPrompt.trim()
+					: await vscode.window.showInputBox({
+							prompt: 'What do you want Copilot to do?',
+							placeHolder: 'e.g., Refactor this function to be more readable'
+						});
+			if (!userPrompt) {
+				return;
+			}
+
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "GLAT: Finding relevant context...",
+				cancellable: false
+			}, async () => {
+				const editor = vscode.window.activeTextEditor;
+				const activeAbsPath = editor?.document.fileName;
+				const activeRelPath = activeAbsPath ? toWorkspaceRelativePath(activeAbsPath) : undefined;
+				const fileContents = editor?.document.getText();
+
+				let recentCards: ChangeCard[] = [];
+				try {
+					// Fetch the workspace-wide memory pool instead of just the active file
+					recentCards = await supabase.getRecentChangeCards(50);
+				} catch (e) {
+					console.error(e);
+				}
+
+				const relevant = await filterRelevantCardsWithGemini(userPrompt, recentCards);
+
+				const teammateChanges = relevant.length
+					? relevant.map((c) => `- **${c.author}** (${new Date(c.created_at).toLocaleString()}): ${c.summary}`).join('\n')
+					: '- (none)';
+
+				let prompt = `# GLAT Context Packet\n\n## Task\n${userPrompt}\n\n## Relevant teammate changes\n${teammateChanges}`;
+
+				if (activeRelPath && fileContents) {
+					prompt += `\n\n## Current file\n**${activeRelPath}**${fenceCode(editor?.document.languageId, fileContents)}`;
+				} else {
+					prompt += `\n\n*(No active file provided)*`;
+				}
+
+				await vscode.env.clipboard.writeText(prompt);
+				const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
+				await vscode.window.showTextDocument(doc, { preview: false });
+				vscode.window.showInformationMessage('GLAT: Context packet copied to clipboard. Paste it into Copilot Chat.');
+			});
 		})
 	);
 }
