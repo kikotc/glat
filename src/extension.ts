@@ -459,6 +459,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 			let stdout: string;
 			try {
+				// Trick Git into tracking new/untracked files so their contents appear in `git diff`
+				await execInWorkspace('git add -N .', workspaceRoot);
 				({ stdout } = await execInWorkspace('git diff --name-only', workspaceRoot));
 			} catch (e) {
 				if (!isAuto) vscode.window.showErrorMessage(`GLAT: Failed to read git diff. ${e instanceof Error ? e.message : String(e)}`);
