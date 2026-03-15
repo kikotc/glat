@@ -657,9 +657,11 @@ export function activate(context: vscode.ExtensionContext) {
 
 > **SYSTEM INSTRUCTION FOR AI:** 
 > The "teammate changes" listed below represent recent work from other developers. They may or may not be merged into your local codebase yet.
-> 1. If you do not see these changes locally, **DO NOT** try to re-implement them.
-> 2. **DO ASSUME** they exist exactly as described and will be available during execution.
-> 3. Ensure your code is compatible with these changes. Use or call them only if they are directly necessary for your current task; do not force integration.
+> 1. If you do not see these changes locally, **DO NOT** attempt to re-implement them, and **DO NOT** try to directly import files they just created (they will fail to resolve locally).
+> 2. **DO ASSUME** they exist exactly as described and will be available after a future git merge.
+> 3. **DO** analyze their changes to understand the exact shape of new data, API schemas, or endpoints.
+> 4. If your task requires interacting with their new code, write your code using **mock data, dummy variables, or type stubs** that perfectly match their schema.
+> 5. Your goal is to prepare the current codebase to be seamlessly integrated with their changes, without causing local errors right now.
 
 ## Task
 ${userPrompt}
