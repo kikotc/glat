@@ -513,7 +513,7 @@ export function activate(context: vscode.ExtensionContext) {
 			if (saveTimeout) clearTimeout(saveTimeout);
 			saveTimeout = setTimeout(() => {
 				vscode.commands.executeCommand('glat.broadcastChanges', true); // true = isAuto
-			}, 10000); // 10-second debounce for background autosaves
+			}, 5000); // 5-second debounce for background autosaves
 		})
 	);
 
