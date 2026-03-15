@@ -71,7 +71,7 @@ In modern dev teams, multiple developers and agents work in parallel, but they w
 ### Broadcasting Changes (Developer A)
 1. Simply write code or have Copilot write code for you.
 2. Save the file.
-3. **Do nothing else!** After 10 seconds of inactivity, GLAT will automatically read the diff, generate a summary, sync it to Moorcheh/Supabase, and stage the files to prepare for the next delta.
+3. **Do nothing else!** After 5 seconds of inactivity, GLAT will automatically read the diff, generate a summary, sync it to Moorcheh/Supabase, and stage the files to prepare for the next delta.
 *Note: You can also manually click the "Force Sync" button in the GLAT sidebar.*
 
 ### Retrieving Context (Developer B)
@@ -91,4 +91,4 @@ If you want to modify the extension or build it yourself:
 
 ---
 
-*Built for the 2026 AI Developer Hackathon*
+*Built for the 2026 GenAI Genesis Hackathon*
