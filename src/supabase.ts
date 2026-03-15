@@ -109,3 +109,14 @@ export async function deleteUserCards(author: string): Promise<void> {
 		throw new Error(`Failed to clear context: ${error.message}`);
 	}
 }
+
+export function subscribeToChanges(callback: () => void): { unsubscribe: () => void } {
+	const client = getSupabaseClient();
+	const channel = client.channel('change_cards_changes')
+		.on('postgres_changes', { event: '*', schema: 'public', table: 'change_cards' }, () => {
+			callback();
+		})
+		.subscribe();
+
+	return { unsubscribe: () => { client.removeChannel(channel); } };
+}

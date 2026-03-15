@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { ChangeCard } from './extension';
 
 const NAMESPACE = 'glat-cards';
 const BASE_URL = 'https://api.moorcheh.ai/v1';
@@ -11,14 +12,16 @@ function getApiKey(): string {
 	return key;
 }
 
-export async function uploadSummary(summary: string, cardId: string): Promise<void> {
+export async function uploadSummary(card: ChangeCard): Promise<void> {
 	const apiKey = getApiKey();
 
 	const payload = {
 		documents: [
 			{
-				id: cardId,
-				text: summary
+				id: card.id,
+				text: card.summary,
+				author: card.author,
+				changed_files: card.changed_files
 			}
 		]
 	};

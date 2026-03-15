@@ -22,6 +22,7 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 
 	private _view?: vscode.WebviewView;
 	private _changeCards: ChangeCard[] = [];
+	private _subscription?: { unsubscribe: () => void };
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -55,7 +56,17 @@ class GlaTChangeCardsViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
+		webviewView.onDidDispose(() => {
+			if (this._subscription) {
+				this._subscription.unsubscribe();
+			}
+		});
+
 		await this.updateView();
+
+		this._subscription = supabase.subscribeToChanges(() => {
+			this.updateView();
+		});
 	}
 
 	public async updateView(): Promise<void> {
@@ -486,7 +497,7 @@ export function activate(context: vscode.ExtensionContext) {
 					
 					// Upload the summary to Moorcheh's semantic memory
 					try {
-						await moorcheh.uploadSummary(smartData.summary, card.id);
+						await moorcheh.uploadSummary(card);
 					} catch (moorchehError) {
 						console.error('Failed to upload to Moorcheh:', moorchehError);
 					}
