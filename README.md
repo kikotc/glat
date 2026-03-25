@@ -4,7 +4,7 @@ GLAT (Global Local Agent Transport) is a VS Code extension that acts as a shared
 
 In modern dev teams, multiple developers and agents work in parallel, but they work in isolation. An agent on Developer B's machine has no idea about the uncommitted local changes Developer A is currently making. GLAT bridges this gap by silently syncing local uncommitted changes to a shared semantic memory pool, empowering agents to collaborate across machines before a single commit is ever made.
 
-## Status
+## 📌 Status
 
 This is the original hackathon prototype of GLAT.
 
